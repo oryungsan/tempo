@@ -420,9 +420,22 @@ impl Data {
         five.hotkey_toggle = "Ctrl+Alt+F9".into();
         five.hotkey_reset = "Ctrl+Alt+F10".into();
         let pomo = TimerDef::pomodoro("#E5677A");
+        // 단계 루틴 예시 — 단계마다 다른 끝 소리, 단계마다 마지막 5초 카운트다운
+        let st = |name: &str, secs: u32, sound: &str| Step { name: name.into(), secs, sound: sound.into() };
+        let mut stretch = TimerDef::simple("스트레칭 루틴", 30, "#3FB5E8");
+        stretch.steps = vec![
+            st("목 스트레칭", 30, "bell-rise"),
+            st("어깨 돌리기", 30, "bell-sixth"),
+            st("허리 숙이기", 30, "bell-high"),
+            st("다리 스트레칭", 30, "bell-fall"),
+            st("마무리 호흡", 20, "arpeggio"),
+        ];
+        stretch.warn_secs = 5;
+        stretch.warn_each = true;
+        stretch.notify = true;
         Data {
             version: 1,
-            timers: vec![pomo, five, ramen],
+            timers: vec![pomo, stretch, five, ramen],
             alarms: vec![],
             settings: Settings::default(),
             reminders: vec![],
