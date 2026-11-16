@@ -5,6 +5,8 @@
 set -e
 cd "$(dirname "$0")"
 export PATH="$HOME/.cargo/bin:$HOME/tools/dlltool:$PATH"
+# 실행 파일에 빌드 PC 경로(사용자 이름)가 박히지 않게 — 오류 메시지용 소스 경로를 짧게 바꿈 (뒤에 적은 규칙이 우선)
+export RUSTFLAGS="--remap-path-prefix=$(cygpath -w "$HOME")=~ --remap-path-prefix=$(cygpath -w "$PWD")=tempo"
 cargo test --release
 cargo build --release
 ls -la target/release/tempo.exe
