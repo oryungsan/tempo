@@ -21,8 +21,11 @@ pub const BUILTIN: &[(&str, &str)] = &[
     ("digital", "디지털 비프"),
     ("classic", "클래식 알람"),
     ("soft", "부드러운 알림"),
-    ("warn", "예고 · 짧은 두 번"),
-    ("countdown", "예고 · 카운트다운 삐삐삐"),
+    ("tick", "카운트다운 · 삐"),
+    ("tick-soft", "카운트다운 · 톡"),
+    ("tick-wood", "카운트다운 · 우드"),
+    ("warn", "짧은 두 번"),
+    ("countdown", "삐삐삐"),
 ];
 
 pub fn name_of(id: &str) -> String {
@@ -114,6 +117,8 @@ enum Timbre {
     Marimba,
     Square,
     Soft,
+    /// 아주 짧은 톡 (카운트다운)
+    Click,
 }
 
 fn notes(id: &str) -> (Timbre, Vec<(f32, f32)>) {
@@ -133,6 +138,12 @@ fn notes(id: &str) -> (Timbre, Vec<(f32, f32)>) {
         "classic" => (Square, (0..8).map(|i| (1760.0, i as f32 * 0.11)).collect()),
         "soft" => (Soft, vec![(C5, 0.0), (G5, 0.35), (E5, 0.7)]),
         "warn" => (Marimba, vec![(E6, 0.0), (E6, 0.16)]),
+        "tick" => (Square, vec![(1568.0, 0.0)]),
+        "tick-hi" => (Square, vec![(2093.0, 0.0)]),
+        "tick-soft" => (Click, vec![(1318.5, 0.0)]),
+        "tick-soft-hi" => (Click, vec![(1760.0, 0.0)]),
+        "tick-wood" => (Click, vec![(784.0, 0.0)]),
+        "tick-wood-hi" => (Click, vec![(1046.5, 0.0)]),
         "countdown" => (Square, vec![(1318.5, 0.0), (1318.5, 1.0), (1318.5, 2.0)]),
         _ => (Bell, vec![(A5, 0.0)]),
     }
@@ -145,6 +156,7 @@ pub fn synth(id: &str) -> Vec<f32> {
         Timbre::Marimba => 0.7,
         Timbre::Square => 0.09,
         Timbre::Soft => 1.4,
+        Timbre::Click => 0.12,
     };
     let len = ns.iter().map(|n| n.1).fold(0.0, f32::max) + tail;
     let total = (len * SR as f32) as usize;
@@ -177,6 +189,10 @@ pub fn synth(id: &str) -> Vec<f32> {
                 Timbre::Soft => {
                     let a = (t / 0.03).min(1.0);
                     a * (-2.0 * t).exp() * (w.sin() + 0.12 * (2.0 * w).sin())
+                }
+                Timbre::Click => {
+                    let a = (t / 0.002).min(1.0);
+                    1.6 * a * (-38.0 * t).exp() * (w.sin() + 0.3 * (3.01 * w).sin())
                 }
             };
             buf[i] += 0.28 * v;

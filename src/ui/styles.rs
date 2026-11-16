@@ -318,108 +318,155 @@ fn bulb_level(frac: f32, wide: f32, neck: f32) -> f32 {
 
 pub struct GlassColors {
     pub frame: Color32,
+    pub frame_hi: Color32,
     pub glass: Color32,
     pub outline: Color32,
+    pub shine: Color32,
     pub sand: Color32,
+    pub sand_hi: Color32,
 }
 
 /// 모래시계. `top` = 위 칸에 남은 모래 비율, `angle` = 회전(라디안, 뒤집는 중), `t` = 시간(초, 알갱이 애니메이션)
 pub fn hourglass(p: &Painter, c: Pos2, h: f32, top: f32, falling: bool, angle: f32, t: f64, col: &GlassColors) {
     let top = top.clamp(0.0, 1.0);
-    let w = h * 0.58;
-    let cap_h = h * 0.065;
-    let hb = h / 2.0 - cap_h; // 유리 한 칸 높이
-    let wide = w * 0.43;
-    let neck = h * 0.022;
+    let w = h * 0.60;
+    let cap_h = h * 0.062;
+    let gap = h * 0.010; // 받침과 유리 사이
+    let hb = h / 2.0 - cap_h - gap; // 유리 한 칸 높이
+    let wide = w * 0.41;
+    let neck = h * 0.017;
+    let sw = (h * 0.008).max(1.0); // 유리 선 굵기
     let (sa, ca) = angle.sin_cos();
     let tr = |u: f32, v: f32| Pos2::new(c.x + u * ca - v * sa, c.y + u * sa + v * ca);
-    let poly = |pts: Vec<(f32, f32)>, fill: Color32, stroke: Stroke| {
-        p.add(Shape::convex_polygon(pts.into_iter().map(|(u, v)| tr(u, v)).collect(), fill, stroke));
+    let poly = |pts: &[(f32, f32)], fill: Color32| {
+        p.add(Shape::convex_polygon(pts.iter().map(|&(u, v)| tr(u, v)).collect(), fill, Stroke::NONE));
     };
-    let steps = 28;
-    // 한 칸 외곽 (dir = -1 위, +1 아래)
+    let steps = 32;
+    let hw = |s: f32| bulb_hw(s, wide, neck);
+    let hw_in = |s: f32| (bulb_hw(s, wide, neck) - sw * 1.1).max(0.0);
     let bulb = |dir: f32| -> Vec<(f32, f32)> {
-        let mut v = Vec::new();
+        let mut v = Vec::with_capacity(steps * 2 + 2);
         for i in 0..=steps {
             let s = i as f32 / steps as f32;
-            v.push((-bulb_hw(s, wide, neck), dir * s * hb));
+            v.push((-hw(s), dir * s * hb));
         }
         for i in (0..=steps).rev() {
             let s = i as f32 / steps as f32;
-            v.push((bulb_hw(s, wide, neck), dir * s * hb));
+            v.push((hw(s), dir * s * hb));
         }
         v
     };
-    // 유리
-    poly(bulb(-1.0), col.glass, Stroke::new(h * 0.012, col.outline));
-    poly(bulb(1.0), col.glass, Stroke::new(h * 0.012, col.outline));
-    // 위 칸 모래: 목에서 level 까지
+    let (up, down) = (bulb(-1.0), bulb(1.0));
+    // 유리 안쪽
+    poly(&up, col.glass);
+    poly(&down, col.glass);
+
+    // 위 칸 모래: 목에서 level 까지 (유리 안쪽에 꼭 맞게)
     if top > 0.002 {
         let lv = bulb_level(top, wide, neck);
+        let n = (lv * steps as f32).ceil().max(2.0) as usize;
         let mut v = Vec::new();
-        let n = (lv * steps as f32).ceil().max(1.0) as usize;
         for i in 0..=n {
             let s = lv * i as f32 / n as f32;
-            v.push((-bulb_hw(s, wide, neck) * 0.92, -s * hb));
+            v.push((-hw_in(s), -s * hb));
         }
         for i in (0..=n).rev() {
             let s = lv * i as f32 / n as f32;
-            v.push((bulb_hw(s, wide, neck) * 0.92, -s * hb));
+            v.push((hw_in(s), -s * hb));
         }
-        poly(v, col.sand, Stroke::NONE);
+        poly(&v, col.sand);
+        // 모래 윗면 밝은 선
+        let y = -lv * hb;
+        p.line_segment([tr(-hw_in(lv) * 0.96, y), tr(hw_in(lv) * 0.96, y)], Stroke::new(sw * 1.2, col.sand_hi));
     }
-    // 아래 칸 모래: 바닥에서 쌓임 (위가 뾰족한 언덕)
+
+    // 아래 칸 모래: 바닥에서 쌓이고 위가 둥근 언덕
     let bottom = 1.0 - top;
-    let mut surface_v = hb; // 모래 꼭대기 (줄기가 닿는 곳)
+    let mut surface_v = hb;
     if bottom > 0.002 {
-        // 바닥(s=1)부터 채운 면적 = bottom → 목 기준 높이 sb
         let sb = bulb_level(1.0 - bottom, wide, neck).min(0.995);
-        // 언덕 꼭짓점이 목 위로 넘어가면 다각형이 볼록하지 않아 채우기가 깨짐 → 모래 높이의 절반까지만
-        let peak = (hb * 0.10 * bottom.sqrt()).min(((sb - 0.04) * hb).max(0.0) * 0.5);
-        let hw_s = bulb_hw(sb, wide, neck) * 0.92;
-        let mut v = vec![(0.0, sb * hb - peak), (hw_s, sb * hb)];
-        let n = ((1.0 - sb) * steps as f32).ceil().max(1.0) as usize;
-        for i in 0..=n {
-            let s = sb + (1.0 - sb) * i as f32 / n as f32;
-            v.push((bulb_hw(s, wide, neck) * 0.92, s * hb));
+        // 언덕 꼭짓점이 목 위로 넘으면 다각형이 볼록하지 않아 채우기가 깨짐 → 모래 높이의 절반까지만
+        let peak = (hb * 0.12 * bottom.sqrt()).min(((sb - 0.04) * hb).max(0.0) * 0.5);
+        let ws = hw_in(sb);
+        let mut v = Vec::new();
+        let m = 16;
+        for i in 0..=m {
+            let x = -ws + 2.0 * ws * i as f32 / m as f32;
+            let r = x / ws.max(0.001);
+            v.push((x, sb * hb - peak * (1.0 - r * r)));
         }
-        for i in (0..=n).rev() {
+        let n = ((1.0 - sb) * steps as f32).ceil().max(2.0) as usize;
+        for i in 1..=n {
             let s = sb + (1.0 - sb) * i as f32 / n as f32;
-            v.push((-bulb_hw(s, wide, neck) * 0.92, s * hb));
+            v.push((hw_in(s), s * hb));
         }
-        v.push((-hw_s, sb * hb));
-        poly(v, col.sand, Stroke::NONE);
+        for i in (1..=n).rev() {
+            let s = sb + (1.0 - sb) * i as f32 / n as f32;
+            v.push((-hw_in(s), s * hb));
+        }
+        poly(&v, col.sand);
         surface_v = sb * hb - peak;
     }
+
     // 떨어지는 모래 줄기 + 알갱이
     if falling && top > 0.002 {
-        let a = tr(0.0, 0.0);
-        let b = tr(0.0, surface_v);
-        p.line_segment([a, b], Stroke::new(h * 0.012, col.sand));
-        for k in 0..5 {
-            let ph = ((t * 1.6 + k as f64 * 0.2).fract()) as f32;
-            let pt = tr((k as f32 - 2.0) * h * 0.002, ph * surface_v);
-            p.circle_filled(pt, h * 0.008, col.sand);
+        p.line_segment([tr(0.0, 0.0), tr(0.0, surface_v)], Stroke::new(h * 0.008, col.sand));
+        for k in 0..6 {
+            let ph = ((t * 1.7 + k as f64 / 6.0).fract()) as f32;
+            let jitter = ((k * 37 % 5) as f32 - 2.0) * h * 0.0018;
+            p.circle_filled(tr(jitter, ph * surface_v), h * 0.0065, col.sand_hi);
         }
     }
-    // 뚜껑 · 기둥
-    let cw = w * 0.56;
-    let cap = |v0: f32, v1: f32| vec![(-cw, v0), (cw, v0), (cw, v1), (-cw, v1)];
-    poly(cap(-h / 2.0, -h / 2.0 + cap_h), col.frame, Stroke::NONE);
-    poly(cap(h / 2.0 - cap_h, h / 2.0), col.frame, Stroke::NONE);
+
+    // 유리 선 + 반사광
+    p.add(Shape::closed_line(up.iter().map(|&(u, v)| tr(u, v)).collect(), Stroke::new(sw, col.outline)));
+    p.add(Shape::closed_line(down.iter().map(|&(u, v)| tr(u, v)).collect(), Stroke::new(sw, col.outline)));
+    for dir in [-1.0f32, 1.0] {
+        let pts: Vec<Pos2> = (0..=14)
+            .map(|i| {
+                let s = 0.22 + 0.58 * i as f32 / 14.0;
+                tr(-hw(s) * 0.66, dir * s * hb)
+            })
+            .collect();
+        p.add(Shape::line(pts, Stroke::new(sw * 1.6, col.shine)));
+    }
+
+    // 받침(둥근 모서리) · 기둥
+    let rrect = |u0: f32, v0: f32, u1: f32, v1: f32, r: f32| -> Vec<(f32, f32)> {
+        let mut v = Vec::new();
+        let corners = [(u1 - r, v0 + r, -90.0f32), (u1 - r, v1 - r, 0.0), (u0 + r, v1 - r, 90.0), (u0 + r, v0 + r, 180.0)];
+        for (cx, cy, a0) in corners {
+            for i in 0..=5 {
+                let a = (a0 + 90.0 * i as f32 / 5.0).to_radians();
+                v.push((cx + r * a.cos(), cy + r * a.sin()));
+            }
+        }
+        v
+    };
+    let cw = w * 0.54;
+    let pw = h * 0.014;
     for side in [-1.0f32, 1.0] {
-        let x0 = side * cw * 0.86;
-        let pw = h * 0.016;
-        poly(vec![(x0 - pw, -hb), (x0 + pw, -hb), (x0 + pw, hb), (x0 - pw, hb)], col.frame, Stroke::NONE);
+        let x0 = side * cw * 0.84;
+        poly(&rrect(x0 - pw, -hb - gap, x0 + pw, hb + gap, pw * 0.9), col.frame);
+    }
+    for (v0, v1) in [(-h / 2.0, -h / 2.0 + cap_h), (h / 2.0 - cap_h, h / 2.0)] {
+        poly(&rrect(-cw, v0, cw, v1, cap_h * 0.38), col.frame);
+        // 받침 윗면 밝은 띠
+        poly(&rrect(-cw * 0.94, v0 + cap_h * 0.14, cw * 0.94, v0 + cap_h * 0.36, cap_h * 0.11), col.frame_hi);
     }
 }
 
 pub fn glass_colors(p: &Pal, color: Color32) -> GlassColors {
+    let frame = if p.dark { Color32::from_rgb(0x8C, 0x6A, 0x48) } else { Color32::from_rgb(0xA0, 0x78, 0x50) };
+    let sand = lerp(color, Color32::from_rgb(0xE8, 0xC5, 0x8A), 0.35);
     GlassColors {
-        frame: if p.dark { Color32::from_rgb(0x8A, 0x6A, 0x4A) } else { Color32::from_rgb(0x9C, 0x74, 0x4E) },
-        glass: if p.dark { Color32::from_rgba_unmultiplied(255, 255, 255, 14) } else { Color32::from_rgba_unmultiplied(120, 140, 170, 22) },
-        outline: if p.dark { Color32::from_rgba_unmultiplied(220, 230, 255, 70) } else { Color32::from_rgba_unmultiplied(80, 100, 130, 90) },
-        sand: lerp(color, Color32::from_rgb(0xE8, 0xC5, 0x8A), 0.35),
+        frame,
+        frame_hi: lerp(frame, Color32::WHITE, 0.22),
+        glass: lerp(p.card, p.text, if p.dark { 0.05 } else { 0.035 }),
+        outline: lerp(p.card, p.text, if p.dark { 0.32 } else { 0.38 }),
+        shine: lerp(p.card, Color32::WHITE, if p.dark { 0.22 } else { 0.85 }),
+        sand,
+        sand_hi: lerp(sand, Color32::WHITE, 0.35),
     }
 }
 

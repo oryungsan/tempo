@@ -63,7 +63,8 @@ pub enum Event {
     Finished,
     Looped,
     /// 끝나기 N초 전 (단계 idx)
-    Warn(usize),
+    /// 끝나기 전 카운트다운 — (단계, 남은 초). 마지막 N초 동안 1초마다
+    Warn(usize, u32),
     /// 단계마다 멈춤 — 다음 단계(idx) 시작 대기
     Waiting(usize),
     Jumped(usize),
@@ -95,7 +96,8 @@ pub struct Engine {
     acc: Duration,
     since: Option<Instant>,
     done_at: Option<Instant>,
-    warned: bool,
+    /// 카운트다운에서 마지막으로 울린 남은 초 (같은 초에 두 번 안 울리게)
+    last_tick: Option<u32>,
     /// 단계마다 멈춤으로 다음 단계 시작을 기다리는 중
     pub waiting: bool,
     /// 반복 회차 (처음 = 0)
@@ -124,7 +126,7 @@ impl Engine {
             acc: Duration::ZERO,
             since: None,
             done_at: None,
-            warned: false,
+            last_tick: None,
             waiting: false,
             loops: 0,
             chain_start_unix: 0,
@@ -184,7 +186,7 @@ impl Engine {
         self.idx = idx;
         self.acc = Duration::ZERO;
         self.since = since;
-        self.warned = false;
+        self.last_tick = None;
     }
 
     fn begin(&mut self, now: Instant) {
@@ -297,13 +299,16 @@ impl Engine {
             }
             // 끝나기 전 예고
             let last = self.idx + 1 == self.durations.len();
-            if self.phase == Phase::Running && !self.warned && !self.opts.warn.is_zero() && (self.opts.warn_each || last) {
+            if self.phase == Phase::Running && !self.opts.warn.is_zero() && (self.opts.warn_each || last) {
                 let d = self.durations[self.idx];
-                if d <= self.opts.warn {
-                    self.warned = true; // 단계가 예고 시간보다 짧으면 건너뜀
-                } else if self.step_remaining(now) <= self.opts.warn {
-                    self.warned = true;
-                    ev.push(Event::Warn(self.idx));
+                // 단계가 카운트다운보다 짧으면 건너뜀 (단계 내내 삐삐대지 않게)
+                if d > self.opts.warn {
+                    let s = self.step_remaining(now).as_secs_f32().ceil() as u32;
+                    let w = self.opts.warn.as_secs() as u32;
+                    if s >= 1 && s <= w && self.last_tick != Some(s) {
+                        self.last_tick = Some(s);
+                        ev.push(Event::Warn(self.idx, s));
+                    }
                 }
             }
         } else if self.phase == Phase::Done {
@@ -391,13 +396,16 @@ mod tests {
         e.command(Cmd::Start, t0);
         assert!(e.tick(at(t0, 25_000)).is_empty()); // 1단계 끝 전 — 마지막 단계만이라 없음
         assert_eq!(e.tick(at(t0, 30_100)), vec![Event::StepEnded(0)]);
-        assert!(e.tick(at(t0, 49_000)).is_empty());
-        assert_eq!(e.tick(at(t0, 50_000)), vec![Event::Warn(1)]);
-        assert!(e.tick(at(t0, 55_000)).is_empty()); // 한 번만
+        assert!(e.tick(at(t0, 49_900)).is_empty());
+        assert_eq!(e.tick(at(t0, 50_050)), vec![Event::Warn(1, 10)]);
+        assert!(e.tick(at(t0, 50_500)).is_empty()); // 같은 초에는 한 번
+        assert_eq!(e.tick(at(t0, 51_050)), vec![Event::Warn(1, 9)]);
+        assert_eq!(e.tick(at(t0, 59_050)), vec![Event::Warn(1, 1)]);
+        assert_eq!(e.tick(at(t0, 60_050)), vec![Event::StepEnded(1), Event::Finished]); // 끝은 끝 소리
         let mut e = Engine::with_opts(d(&[30, 30, 5]), Opts { warn_each: true, ..o });
         e.command(Cmd::Start, t0);
-        assert_eq!(e.tick(at(t0, 20_000)), vec![Event::Warn(0)]);
-        assert_eq!(e.tick(at(t0, 50_000)), vec![Event::StepEnded(0), Event::Warn(1)]);
+        assert_eq!(e.tick(at(t0, 20_050)), vec![Event::Warn(0, 10)]);
+        assert_eq!(e.tick(at(t0, 50_050)), vec![Event::StepEnded(0), Event::Warn(1, 10)]);
         assert_eq!(e.tick(at(t0, 60_000)), vec![Event::StepEnded(1)]); // 5초 단계 < 예고 10초 → 건너뜀
     }
 

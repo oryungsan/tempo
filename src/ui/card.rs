@@ -271,7 +271,8 @@ fn card_menu(core: &Arc<Core>, def: &TimerDef, v: &TimerView, st: &CardState, st
     items.push(Item::Sep);
     items.push(cmd(30, "집중 화면 열기"));
     items.push(cmd(31, "편집…"));
-    items.push(cmd(32, if def.card == CardMode::Always { "실행 중에만 카드 표시" } else { "카드 숨기기" }));
+    items.push(cmd(33, "카드 닫기 (다시 시작하면 표시)"));
+    items.push(cmd(32, if def.card == CardMode::Always { "앞으로 실행 중에만 카드 표시" } else { "앞으로 카드 표시 안 함" }));
     let core = core.clone();
     let card_mode = def.card;
     let expand = st.expand_req.clone();
@@ -314,6 +315,7 @@ fn card_menu(core: &Arc<Core>, def: &TimerDef, v: &TimerView, st: &CardState, st
                 let mode = if card_mode == CardMode::Always { CardMode::WhenActive } else { CardMode::Off };
                 set(&|t| t.card = mode);
             }
+            33 => core.hide_card(id),
             _ => {}
         }
     });
@@ -402,6 +404,25 @@ fn draw(ui: &mut egui::Ui, ctx: &egui::Context, core: &Arc<Core>, def: &TimerDef
     }
     if expanded {
         paint_steps(&p, ctx, def, v, k, pc, list_area);
+    }
+    // 닫기 × — 카드 위에 마우스가 있을 때만 (그 타이머를 다시 시작하면 다시 뜸)
+    let hovering = ctx.input(|i| i.pointer.hover_pos()).map(|q| card.contains(q)).unwrap_or(false);
+    if hovering {
+        let xc = if style == Style::Ring {
+            let r = face.width() / 2.0;
+            Pos2::new(face.center().x + r * 0.70, face.center().y - r * 0.70)
+        } else {
+            Pos2::new(card.right() - 11.0 * k, card.top() + 11.0 * k)
+        };
+        let xr = 8.0 * k;
+        let rx = round_btn(ui, xc, xr, ui.id().with(("close", def.id)), pc.input, pc.red.gamma_multiply(0.85));
+        let s = xr * 0.38;
+        let col = if rx.hovered() { Color32::WHITE } else { pc.muted };
+        p.line_segment([xc + egui::vec2(-s, -s), xc + egui::vec2(s, s)], Stroke::new(1.6_f32 * k, col));
+        p.line_segment([xc + egui::vec2(-s, s), xc + egui::vec2(s, -s)], Stroke::new(1.6_f32 * k, col));
+        if rx.on_hover_text("카드 닫기 — 다시 시작하면 다시 뜹니다").clicked() {
+            core.hide_card(def.id);
+        }
     }
     menu_req
 }

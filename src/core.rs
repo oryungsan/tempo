@@ -91,6 +91,8 @@ pub struct Core {
     /// 카드 두 번 누름 → 메인 창에서 그 타이머 집중 화면
     pub focus_request: Mutex<Option<Id>>,
     stats: Mutex<Stats>,
+    /// 닫은 카드 (그 타이머를 다시 시작하면 다시 보임)
+    hidden_cards: Mutex<std::collections::HashSet<Id>>,
     /// 리마인더별로 이미 울린 due (같은 시각에 두 번 안 울리게)
     rem_fired: Mutex<HashMap<Id, String>>,
     /// To Do 연동 상태 (설정 화면 표시용)
@@ -120,6 +122,7 @@ impl Core {
             edit_request: Mutex::new(None),
             focus_request: Mutex::new(None),
             rem_fired: Mutex::new(HashMap::new()),
+            hidden_cards: Mutex::new(HashSet::new()),
             todo: Mutex::new(Default::default()),
             stats: Mutex::new(std::fs::read_to_string(stats_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()),
             bench_until: Mutex::new(None),
@@ -288,6 +291,16 @@ impl Core {
         }
     }
 
+    /// 떠 있는 카드 닫기 — 그 타이머를 다시 시작하면 다시 보임
+    pub fn hide_card(&self, id: Id) {
+        self.hidden_cards.lock().unwrap().insert(id);
+        self.repaint();
+    }
+
+    pub fn card_hidden(&self, id: Id) -> bool {
+        self.hidden_cards.lock().unwrap().contains(&id)
+    }
+
     fn timer_name(&self, id: Id) -> String {
         self.data().timers.iter().find(|t| t.id == id).map(|t| t.name.clone()).unwrap_or_default()
     }
@@ -339,6 +352,7 @@ impl Core {
         for e in &ev {
             match e {
                 Event::Started => {
+                    self.hidden_cards.lock().unwrap().remove(&id);
                     let s = self.rt.lock().unwrap().get(&id).map(|e| e.chain_start_unix).unwrap_or(0);
                     log(format!("{} start ({src}) chain_start_unix={s}", t.name));
                 }
@@ -367,10 +381,19 @@ impl Core {
                     self.add_stat(id, |st| st.completes += 1);
                 }
                 Event::Jumped(i) => log(format!("{} jump to step {} ({src})", t.name, i + 1)),
-                Event::Warn(i) => {
-                    log(format!("{} warn {}s before end of step {}", t.name, t.warn_secs, i + 1));
+                Event::Warn(i, s) => {
+                    if *s == t.warn_secs {
+                        log(format!("{} countdown {}s before end of step {}", t.name, s, i + 1));
+                    }
+                    // 옛 설정값(한 번 울리던 예고음)은 짧은 「삐」로
+                    let base = match t.warn_sound.as_str() {
+                        "" | "warn" | "countdown" => "tick".to_string(),
+                        x => x.to_string(),
+                    };
+                    // 마지막 1초는 높은 음
+                    let snd = if *s <= 1 && base.starts_with("tick") { format!("{base}-hi") } else { base };
                     let vol = self.data().settings.volume;
-                    audio::play(&t.warn_sound, PlayOpts { volume: vol, repeat: 1, looping: false, max: Duration::ZERO });
+                    audio::play(&snd, PlayOpts { volume: vol, repeat: 1, looping: false, max: Duration::ZERO });
                 }
                 Event::Waiting(i) => log(format!("{} waiting to start step {}", t.name, i + 1)),
                 Event::Paused => log(format!("{} pause ({src})", t.name)),

@@ -145,7 +145,7 @@ pub fn ui(ui: &mut Ui, core: &Arc<Core>, p: &Pal, def: &TimerDef, v: &TimerView,
             Style::Minimal => 260.0,
             Style::Digital => 250.0,
             Style::Fill => 280.0,
-            Style::Hourglass => 500.0,
+            Style::Hourglass => 528.0,
         };
         let vis = Rect::from_min_size(Pos2::new(x0, y), egui::vec2(w, vis_h));
         paint_big(&pt, ui.ctx(), vis, style, p, &d, def, v);
@@ -334,9 +334,9 @@ fn paint_big(pt: &egui::Painter, ctx: &egui::Context, vis: Rect, style: Style, p
             }
             let gc = styles::glass_colors(p, d.color);
             styles::hourglass(pt, Pos2::new(c.x, vis.top() + 165.0), 320.0, top, falling, angle, ctx.input(|i| i.time), &gc);
-            pill(pt, Pos2::new(c.x, vis.top() + 352.0), &d.status, d.status_col);
-            big_digits(pt, Pos2::new(c.x, vis.top() + 448.0), 84.0, d.dcol);
-            pt.text(Pos2::new(c.x, vis.top() + 484.0), Align2::CENTER_CENTER, &d.sub, FontId::proportional(16.0), p.muted);
+            pill(pt, Pos2::new(c.x, vis.top() + 356.0), &d.status, d.status_col);
+            big_digits(pt, Pos2::new(c.x, vis.top() + 484.0), 84.0, d.dcol);
+            pt.text(Pos2::new(c.x, vis.top() + 508.0), Align2::CENTER_CENTER, &d.sub, FontId::proportional(16.0), p.muted);
         }
         Style::Fill => {
             let r = vis.shrink2(egui::vec2(4.0, 10.0));

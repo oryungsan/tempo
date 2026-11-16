@@ -181,7 +181,7 @@ impl eframe::App for App {
         let mut shown = Vec::new();
         for def in &defs {
             let Some(v) = views.iter().find(|v| v.id == def.id) else { continue };
-            if !card::card_visible(def, v) {
+            if !card::card_visible(def, v) || core.card_hidden(def.id) {
                 continue;
             }
             let style = styles::style_of(def, settings.style);

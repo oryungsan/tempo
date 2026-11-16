@@ -149,7 +149,7 @@ fn yes() -> bool {
     true
 }
 fn warn_sound() -> String {
-    "warn".into()
+    "tick".into()
 }
 
 impl TimerDef {
@@ -171,7 +171,7 @@ impl TimerDef {
             card_pos: None,
             warn_secs: 10,
             warn_each: false,
-            warn_sound: "warn".into(),
+            warn_sound: "tick".into(),
             auto_advance: true,
             pomodoro: None,
             style: None,

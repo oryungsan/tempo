@@ -321,20 +321,20 @@ impl TimerEdit {
                 field_label(ui, p, "소리 반복");
                 ui.add(egui::DragValue::new(&mut self.def.sound_repeat).range(1..=5).suffix(" 회"));
                 ui.end_row();
-                field_label(ui, p, "끝나기 전 알림");
+                field_label(ui, p, "끝나기 전 카운트다운");
                 ui.horizontal(|ui| {
                     ui.add_sized(
                         [92.0, 28.0],
                         egui::DragValue::new(&mut self.def.warn_secs)
                             .range(0..=3600)
                             .speed(0.3)
-                            .custom_formatter(|v, _| if v < 0.5 { "끔".into() } else { format!("{} 초 전", v as u32) })
+                            .custom_formatter(|v, _| if v < 0.5 { "끔".into() } else { format!("마지막 {}초", v as u32) })
                             .custom_parser(|s| {
                                 let s = s.trim();
                                 if s == "끔" {
                                     Some(0.0)
                                 } else {
-                                    s.trim_end_matches("초 전").trim_end_matches('초').trim().parse::<f64>().ok()
+                                    s.trim_start_matches("마지막").trim_end_matches("초 전").trim_end_matches('초').trim().parse::<f64>().ok()
                                 }
                             }),
                     );
