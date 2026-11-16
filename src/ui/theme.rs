@@ -492,3 +492,33 @@ pub fn icon_rgba(n: usize) -> Vec<u8> {
     }
     rgba
 }
+
+/// 숫자 글자의 실제 잉크 범위 — 글자 줄 아랫선(draw_digits 의 기준점) 위로 (잉크 위까지 거리, 잉크 아래까지 거리).
+/// 글꼴마다 위아래 여백이 달라 고정 비율로 배치하면 다른 글과 겹쳤다
+pub fn digit_ink(ctx: &egui::Context, font: &FontId) -> (f32, f32) {
+    let g = ctx.fonts(|f| f.layout_no_wrap("0".into(), font.clone(), Color32::WHITE));
+    let h = g.size().y;
+    match g.rows.first().and_then(|r| r.glyphs.first()) {
+        Some(gl) => {
+            let top = gl.pos.y + gl.uv_rect.offset.y;
+            let bot = top + gl.uv_rect.size.y;
+            (h - top, h - bot)
+        }
+        None => (font.size * 0.95, font.size * 0.2),
+    }
+}
+
+/// 숫자 잉크 높이
+pub fn digit_ink_h(ctx: &egui::Context, font: &FontId) -> f32 {
+    let (a, b) = digit_ink(ctx, font);
+    a - b
+}
+
+/// 숫자를 잉크 윗선 기준으로 가운데 정렬해 그림 — 반환 = 잉크 아랫선 y
+pub fn draw_digits_at(p: &egui::Painter, ctx: &egui::Context, center_x: f32, ink_top: f32, text: &str, font: FontId, color: Color32) -> f32 {
+    let (a, b) = digit_ink(ctx, &font);
+    let anchor_y = ink_top + a;
+    let w = digits_width(ctx, text, &font);
+    draw_digits(p, ctx, Pos2::new(center_x - w / 2.0, anchor_y), false, text, font, color);
+    anchor_y - b
+}

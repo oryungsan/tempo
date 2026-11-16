@@ -140,13 +140,7 @@ pub fn ui(ui: &mut Ui, core: &Arc<Core>, p: &Pal, def: &TimerDef, v: &TimerView,
         }
 
         // 큰 그림
-        let vis_h = match style {
-            Style::Ring | Style::Classic => 400.0,
-            Style::Minimal => 260.0,
-            Style::Digital => 250.0,
-            Style::Fill => 280.0,
-            Style::Hourglass => 528.0,
-        };
+        let vis_h = big_height(ui.ctx(), style, &d.text);
         let vis = Rect::from_min_size(Pos2::new(x0, y), egui::vec2(w, vis_h));
         paint_big(&pt, ui.ctx(), vis, style, p, &d, def, v);
         if style == Style::Hourglass {
@@ -174,11 +168,21 @@ pub fn ui(ui: &mut Ui, core: &Arc<Core>, p: &Pal, def: &TimerDef, v: &TimerView,
             _ => ("현재 단계", v.step_name.clone()),
         };
         pt.text(Pos2::new(bx.left() + 52.0, bx.center().y - 13.0), Align2::LEFT_CENTER, lbl, FontId::proportional(13.0), p.muted);
-        pt.text(Pos2::new(bx.left() + 52.0, bx.center().y + 12.0), Align2::LEFT_CENTER, main, bold(17.0), p.text);
+        let trunc = |text: &str, font: FontId, color: Color32, w: f32| {
+            let mut job = egui::text::LayoutJob::single_section(text.to_string(), egui::TextFormat { font_id: font, color, ..Default::default() });
+            job.wrap = egui::text::TextWrapping::truncate_at_width(w.max(40.0));
+            ui.fonts(|f| f.layout_job(job))
+        };
+        let mut next_w = 0.0;
         if let Some(next) = def.steps.get(v.idx + 1).filter(|_| v.phase.active()) {
+            // 다음 단계는 상자의 40% 까지만
+            let ng = trunc(&format!("{} · {}", next.name, short_dur(next.secs)), FontId::proportional(14.0), p.muted, bx.width() * 0.40);
+            next_w = ng.size().x;
             pt.text(Pos2::new(bx.right() - 22.0, bx.center().y - 13.0), Align2::RIGHT_CENTER, "다음", FontId::proportional(12.5), p.faint);
-            pt.text(Pos2::new(bx.right() - 22.0, bx.center().y + 12.0), Align2::RIGHT_CENTER, format!("{} · {}", next.name, short_dur(next.secs)), FontId::proportional(14.0), p.muted);
+            pt.galley(Pos2::new(bx.right() - 22.0 - ng.size().x, bx.center().y + 12.0 - ng.size().y / 2.0), ng, p.muted);
         }
+        let mg = trunc(&main, bold(17.0), p.text, bx.width() - 52.0 - 22.0 - next_w - 24.0);
+        pt.galley(Pos2::new(bx.left() + 52.0, bx.center().y + 12.0 - mg.size().y / 2.0), mg, p.text);
         y += 78.0 + 22.0;
 
         // 버튼 줄
@@ -280,14 +284,18 @@ fn paint_big(pt: &egui::Painter, ctx: &egui::Context, vis: Rect, style: Style, p
         Style::Ring => {
             let r = vis.height() / 2.0 - 14.0;
             styles::ring(pt, c, r, 14.0, d.rem_frac, col, p.track);
-            pill(pt, Pos2::new(c.x, c.y - 92.0), &d.status, d.status_col);
-            big_digits(pt, Pos2::new(c.x, c.y + 50.0), 104.0, d.dcol);
-            pt.text(Pos2::new(c.x, c.y + 86.0), Align2::CENTER_CENTER, &d.sub, FontId::proportional(17.0), p.muted);
+            let font = digits(if d.text.len() > 5 { 78.0 } else { 104.0 });
+            let ih = digit_ink_h(ctx, &font);
+            let ink_top = c.y - ih / 2.0 - 4.0;
+            pill(pt, Pos2::new(c.x, ink_top - 30.0), &d.status, d.status_col);
+            let bottom = draw_digits_at(pt, ctx, c.x, ink_top, &d.text, font, d.dcol);
+            pt.text(Pos2::new(c.x, bottom + 30.0), Align2::CENTER_CENTER, &d.sub, FontId::proportional(17.0), p.muted);
         }
         Style::Classic => {
-            pill(pt, Pos2::new(c.x, vis.top() + 70.0), &d.status, d.status_col);
-            big_digits(pt, Pos2::new(c.x, c.y + 60.0), 140.0, d.dcol);
-            let bar = Rect::from_center_size(Pos2::new(c.x, c.y + 110.0), egui::vec2(vis.width() * 0.86, 10.0));
+            pill(pt, Pos2::new(c.x, vis.top() + 20.0), &d.status, d.status_col);
+            let font = digits(if d.text.len() > 5 { 105.0 } else { 140.0 });
+            let bottom = draw_digits_at(pt, ctx, c.x, vis.top() + 52.0, &d.text, font, d.dcol);
+            let bar = Rect::from_center_size(Pos2::new(c.x, bottom + 34.0), egui::vec2(vis.width() * 0.86, 10.0));
             let seg = match v.phase {
                 Phase::Idle => SegState::Idle,
                 Phase::Done => SegState::Done,
@@ -295,12 +303,13 @@ fn paint_big(pt: &egui::Painter, ctx: &egui::Context, vis: Rect, style: Style, p
             };
             let frac = if def.steps.len() > 1 { v.frac } else { d.done_total };
             paint_segments(pt, bar, &v.step_secs, &[d.color], v.idx, frac, seg, p.track, p.green);
-            pt.text(Pos2::new(c.x, c.y + 146.0), Align2::CENTER_CENTER, &d.sub, FontId::proportional(16.0), p.muted);
+            pt.text(Pos2::new(c.x, bar.bottom() + 26.0), Align2::CENTER_CENTER, &d.sub, FontId::proportional(16.0), p.muted);
         }
         Style::Minimal => {
-            pt.text(Pos2::new(c.x, vis.top() + 24.0), Align2::CENTER_CENTER, &d.status, FontId::proportional(15.0), d.status_col);
-            big_digits(pt, Pos2::new(c.x, c.y + 78.0), 180.0, d.dcol);
-            let y = vis.bottom() - 20.0;
+            pt.text(Pos2::new(c.x, vis.top() + 14.0), Align2::CENTER_CENTER, &d.status, FontId::proportional(15.0), d.status_col);
+            let font = digits(if d.text.len() > 5 { 130.0 } else { 170.0 });
+            let bottom = draw_digits_at(pt, ctx, c.x, vis.top() + 46.0, &d.text, font, d.dcol);
+            let y = bottom + 26.0;
             let l = c.x - vis.width() * 0.4;
             let r = c.x + vis.width() * 0.4;
             pt.line_segment([Pos2::new(l, y), Pos2::new(r, y)], Stroke::new(1.0_f32, p.track));
@@ -335,8 +344,8 @@ fn paint_big(pt: &egui::Painter, ctx: &egui::Context, vis: Rect, style: Style, p
             let gc = styles::glass_colors(p, d.color);
             styles::hourglass(pt, Pos2::new(c.x, vis.top() + 165.0), 320.0, top, falling, angle, ctx.input(|i| i.time), &gc);
             pill(pt, Pos2::new(c.x, vis.top() + 356.0), &d.status, d.status_col);
-            big_digits(pt, Pos2::new(c.x, vis.top() + 484.0), 84.0, d.dcol);
-            pt.text(Pos2::new(c.x, vis.top() + 508.0), Align2::CENTER_CENTER, &d.sub, FontId::proportional(16.0), p.muted);
+            let bottom = draw_digits_at(pt, ctx, c.x, vis.top() + 388.0, &d.text, digits(84.0), d.dcol);
+            pt.text(Pos2::new(c.x, bottom + 26.0), Align2::CENTER_CENTER, &d.sub, FontId::proportional(16.0), p.muted);
         }
         Style::Fill => {
             let r = vis.shrink2(egui::vec2(4.0, 10.0));
@@ -345,8 +354,23 @@ fn paint_big(pt: &egui::Painter, ctx: &egui::Context, vis: Rect, style: Style, p
             styles::fill(pt, r.shrink(1.0), 27.0, d.done_total, col.gamma_multiply(if p.dark { 0.38 } else { 0.28 }));
             pt.text(Pos2::new(r.left() + 30.0, r.top() + 34.0), Align2::LEFT_CENTER, &d.status, bold(16.0), d.status_col);
             pt.text(Pos2::new(r.right() - 30.0, r.top() + 34.0), Align2::RIGHT_CENTER, format!("{}%", (d.done_total * 100.0).round()), digits(22.0), p.muted);
-            big_digits(pt, Pos2::new(c.x, c.y + 62.0), 140.0, d.dcol);
-            pt.text(Pos2::new(c.x, r.bottom() - 30.0), Align2::CENTER_CENTER, &d.sub, FontId::proportional(15.0), p.muted);
+            let font = digits(if d.text.len() > 5 { 100.0 } else { 130.0 });
+            let bottom = draw_digits_at(pt, ctx, c.x, r.top() + 66.0, &d.text, font, d.dcol);
+            pt.text(Pos2::new(c.x, bottom + 30.0), Align2::CENTER_CENTER, &d.sub, FontId::proportional(15.0), p.muted);
         }
+    }
+}
+
+/// 큰 그림 높이 — 디자인별로 실제 숫자 잉크 높이를 재서 (paint_big 배치와 같은 수치)
+fn big_height(ctx: &egui::Context, style: Style, text: &str) -> f32 {
+    let long = text.len() > 5;
+    let ink = |s: f32| digit_ink_h(ctx, &digits(s));
+    match style {
+        Style::Ring => 400.0,
+        Style::Classic => 52.0 + ink(if long { 105.0 } else { 140.0 }) + 34.0 + 5.0 + 26.0 + 20.0,
+        Style::Minimal => 46.0 + ink(if long { 130.0 } else { 170.0 }) + 26.0 + 14.0,
+        Style::Digital => 250.0,
+        Style::Hourglass => 388.0 + ink(84.0) + 26.0 + 22.0,
+        Style::Fill => 10.0 + 66.0 + ink(if long { 100.0 } else { 130.0 }) + 30.0 + 26.0 + 10.0,
     }
 }
