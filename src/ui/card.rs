@@ -77,6 +77,11 @@ impl CardState {
     }
 }
 
+/// 이 카드가 항상 위인지 (카드별 설정 → 없으면 전체 설정)
+pub fn card_on_top(core: &Core, def: &TimerDef) -> bool {
+    def.card_on_top.unwrap_or_else(|| core.data().settings.cards_on_top)
+}
+
 pub fn card_visible(def: &TimerDef, v: &TimerView) -> bool {
     match def.card {
         CardMode::Always => true,
@@ -104,7 +109,7 @@ pub fn show(ctx: &egui::Context, core: &Arc<Core>, def: &TimerDef, v: &TimerView
         .with_transparent(true)
         .with_resizable(false)
         .with_taskbar(false)
-        .with_window_level(egui::WindowLevel::AlwaysOnTop)
+        .with_window_level(if card_on_top(core, def) { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal })
         .with_icon(app_icon());
     let vid = egui::ViewportId::from_hash_of(("card", def.id));
     ctx.show_viewport_immediate(vid, builder, |ctx, _| {
@@ -268,6 +273,8 @@ fn card_menu(core: &Arc<Core>, def: &TimerDef, v: &TimerView, st: &CardState, st
         format!("카드 크기 ({}%)", (k * 100.0).round()),
         vec![cmd(20, "크게 (+25%)"), cmd(21, "작게 (−20%)"), Item::Cmd(22, "원래대로".into(), false, def.card_scale.is_some())],
     ));
+    let on_top = card_on_top(core, def);
+    items.push(Item::Cmd(16, "항상 위에 표시".into(), on_top, true));
     items.push(Item::Sep);
     items.push(cmd(30, "집중 화면 열기"));
     items.push(cmd(31, "편집…"));
@@ -298,6 +305,7 @@ fn card_menu(core: &Arc<Core>, def: &TimerDef, v: &TimerView, st: &CardState, st
                 let s = Style::ALL[(c - 10) as usize];
                 set(&|t| t.style = Some(s));
             }
+            16 => set(&|t| t.card_on_top = Some(!on_top)),
             20 => set(&|t| t.card_scale = Some(((k * 1.25).min(4.0) * 100.0).round() / 100.0)),
             21 => set(&|t| t.card_scale = Some(((k * 0.8).max(0.5) * 100.0).round() / 100.0)),
             22 => set(&|t| t.card_scale = None),

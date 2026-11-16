@@ -71,6 +71,9 @@ pub struct TimerDef {
     /// 이 카드만 다른 크기 (가장자리를 끌어 조절, None = 설정 따름)
     #[serde(default)]
     pub card_scale: Option<f32>,
+    /// 이 카드만 항상 위 켬/끔 (None = 설정 따름)
+    #[serde(default)]
+    pub card_on_top: Option<bool>,
 }
 
 /// 타이머 모양 — 색 테마와 별개
@@ -176,6 +179,7 @@ impl TimerDef {
             pomodoro: None,
             style: None,
             card_scale: None,
+            card_on_top: None,
         }
     }
 
@@ -273,6 +277,12 @@ pub struct Settings {
     pub style: Style,
     #[serde(default)]
     pub todo: TodoSettings,
+    /// 메인 창 항상 위
+    #[serde(default)]
+    pub main_on_top: bool,
+    /// 떠 있는 카드 항상 위 (기본 켬)
+    #[serde(default = "yes")]
+    pub cards_on_top: bool,
 }
 
 fn classic() -> Style {
@@ -293,6 +303,8 @@ impl Default for Settings {
             main_size: None,
             style: Style::Classic,
             todo: TodoSettings::default(),
+            main_on_top: false,
+            cards_on_top: true,
         }
     }
 }

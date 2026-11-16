@@ -134,6 +134,26 @@ fn sidebar(ctx: &egui::Context, core: &Arc<Core>, st: &mut MainState, p: &Pal, v
                 )));
                 ui.painter().line_segment([c, Pos2::new(c.x, c.y - 5.5)], Stroke::new(2.0_f32, p.text));
                 ui.label(RichText::new("Tempo").font(bold(20.0)).color(p.text));
+                // 항상 위 고정 핀
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let on = core.data().settings.main_on_top;
+                    let (r, resp) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), Sense::click());
+                    let bg = if on { p.accent.gamma_multiply(0.18) } else if resp.hovered() { p.card_hi } else { Color32::TRANSPARENT };
+                    ui.painter().rect_filled(r, cr(8.0), bg);
+                    let col = if on { p.accent } else { p.muted };
+                    let c = r.center();
+                    // 핀: 머리(둥근) + 몸통 + 바늘
+                    ui.painter().circle_filled(c + egui::vec2(2.5, -3.0), 3.6, col);
+                    ui.painter().line_segment([c + egui::vec2(-1.5, -6.0), c + egui::vec2(6.5, 2.0)], Stroke::new(2.2_f32, col));
+                    ui.painter().line_segment([c + egui::vec2(1.0, 0.0), c + egui::vec2(-5.5, 6.5)], Stroke::new(1.6_f32, col));
+                    if resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    let tip = if on { "항상 위에 표시 중 — 누르면 해제" } else { "이 창을 항상 위에 표시" };
+                    if resp.on_hover_text(tip).clicked() {
+                        core.update(|d| d.settings.main_on_top = !on);
+                    }
+                });
             });
             ui.add_space(22.0);
             let running = views.iter().filter(|v| v.phase.active()).count();
@@ -658,6 +678,7 @@ fn settings_page(ui: &mut Ui, core: &Arc<Core>, st: &mut MainState, p: &Pal) {
     page_header(ui, p, "설정", "", None);
     let mut s = core.data().settings.clone();
     let before = s.clone();
+    let mut reset_card_top = false;
     let timers: Vec<(Id, String)> = core.data().timers.iter().map(|t| (t.id, t.name.clone())).collect();
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.set_max_width(ui.available_width().min(760.0));
@@ -681,6 +702,17 @@ fn settings_page(ui: &mut Ui, core: &Arc<Core>, st: &mut MainState, p: &Pal) {
             ui.separator();
             row(ui, p, "창을 닫으면 트레이로", "끄면 창을 닫을 때 Tempo 가 종료됩니다 (타이머·알람도 멈춤)", |ui| {
                 toggle(ui, p, &mut s.close_to_tray);
+            });
+            ui.separator();
+            row(ui, p, "메인 창을 항상 위에", "다른 프로그램 창보다 앞에 표시 (왼쪽 위 핀 버튼과 같음)", |ui| {
+                toggle(ui, p, &mut s.main_on_top);
+            });
+            ui.separator();
+            row(ui, p, "떠 있는 카드를 항상 위에", "모든 카드 기본값 — 카드마다 오른쪽 클릭 메뉴 「항상 위에 표시」로 따로 정할 수 있습니다", |ui| {
+                if toggle(ui, p, &mut s.cards_on_top).changed() {
+                    // 전체 설정을 바꾸면 카드별 예외는 지움 (헷갈리지 않게)
+                    reset_card_top = true;
+                }
             });
             ui.separator();
             ui.label(RichText::new("디자인").size(14.5).color(p.text));
@@ -753,7 +785,14 @@ fn settings_page(ui: &mut Ui, core: &Arc<Core>, st: &mut MainState, p: &Pal) {
         if vol_only {
             core.update_quiet(|d| d.settings = s);
         } else {
-            core.update(|d| d.settings = s);
+            core.update(|d| {
+                d.settings = s;
+                if reset_card_top {
+                    for t in d.timers.iter_mut() {
+                        t.card_on_top = None;
+                    }
+                }
+            });
         }
     }
 }

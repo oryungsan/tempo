@@ -133,6 +133,7 @@ impl eframe::App for App {
                 .with_title("Tempo")
                 .with_inner_size(size)
                 .with_min_inner_size([780.0, 540.0])
+                .with_window_level(if settings.main_on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal })
                 .with_icon(theme::app_icon());
             if let Some(pos) = settings.main_pos.filter(|p| core.on_screen(p[0], p[1])) {
                 b = b.with_position(pos);
