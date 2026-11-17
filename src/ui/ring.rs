@@ -116,6 +116,18 @@ pub fn show(ctx: &egui::Context, core: &Arc<Core>, p: &Pal) {
                             core.dismiss(kind);
                         }
                     }
+                    RingKind::Timer(id) if core.data().timers.iter().any(|t| t.id == id && t.bed.is_some()) => {
+                        if primary(ui, &p, "  비우기  ").clicked() {
+                            core.bed_clear(id, "ring");
+                        }
+                        if ghost(ui, &p, "+5분").clicked() {
+                            core.dismiss(kind);
+                            core.bed_extend(id, 5, "ring");
+                        }
+                        if ghost(ui, &p, "닫기").clicked() {
+                            core.dismiss(kind);
+                        }
+                    }
                     RingKind::Timer(id) => {
                         if primary(ui, &p, "  닫기  ").clicked() {
                             core.dismiss(kind);

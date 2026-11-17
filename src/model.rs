@@ -63,6 +63,9 @@ pub struct TimerDef {
     /// 끝나기 전 화면 효과 (예고음 구간 동안)
     #[serde(default = "default_fx")]
     pub warn_fx: Vec<WarnFx>,
+    /// 치료실 베드 (있으면 「치료실」 화면에서만 보임)
+    #[serde(default)]
+    pub bed: Option<BedInfo>,
     /// false = 단계가 끝날 때마다 멈추고 ▶ 를 기다림
     #[serde(default = "yes")]
     pub auto_advance: bool,
@@ -146,6 +149,62 @@ impl Pomo {
     }
 }
 
+/// 치료실 베드 — 번호 · 지금 환자 · 지금 프로그램
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct BedInfo {
+    pub no: u32,
+    #[serde(default)]
+    pub patient: String,
+    #[serde(default)]
+    pub program: String,
+}
+
+/// 치료 프로그램 (베드에서 고르는 것) — 단계 여러 개 가능 (예: 핫팩 10분 → 침 15분)
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct BedPreset {
+    pub id: Id,
+    pub name: String,
+    pub steps: Vec<Step>,
+    #[serde(default = "preset_color")]
+    pub color: String,
+}
+
+fn preset_color() -> String {
+    "#3FB5E8".into()
+}
+
+impl BedPreset {
+    pub fn new(name: &str, steps: &[(&str, u32)], color: &str) -> Self {
+        let n = steps.len();
+        BedPreset {
+            id: new_id(),
+            name: name.into(),
+            steps: steps
+                .iter()
+                .enumerate()
+                .map(|(i, (s, m))| Step { name: (*s).into(), secs: m * 60, sound: if i + 1 == n { "chime".into() } else { "bell-rise".into() } })
+                .collect(),
+            color: color.into(),
+        }
+    }
+
+    /// 처음 베드를 만들 때 넣는 기본 프로그램
+    pub fn defaults() -> Vec<BedPreset> {
+        vec![
+            BedPreset::new("침 15분", &[("침", 15)], "#5B8DEF"),
+            BedPreset::new("전침 15분", &[("전침", 15)], "#8B6CF0"),
+            BedPreset::new("핫팩 → 침", &[("핫팩", 10), ("침", 15)], "#E8A33D"),
+            BedPreset::new("적외선 15분", &[("적외선", 15)], "#E5677A"),
+            BedPreset::new("간섭파 10분", &[("간섭파", 10)], "#2FBF9F"),
+            BedPreset::new("부항 5분", &[("부항", 5)], "#D46CC4"),
+        ]
+    }
+
+    pub fn total_min(&self) -> u32 {
+        self.steps.iter().map(|s| s.secs).sum::<u32>() / 60
+    }
+}
+
 /// 끝나기 전(예고음 구간) 화면 효과
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum WarnFx {
@@ -226,6 +285,7 @@ impl TimerDef {
             warn_each: false,
             warn_sound: "tick".into(),
             warn_fx: default_fx(),
+            bed: None,
             auto_advance: true,
             pomodoro: None,
             style: None,
@@ -340,6 +400,12 @@ pub struct Settings {
     /// PC 연동
     #[serde(default)]
     pub sync: SyncSettings,
+    /// 치료실: 베드가 끝나면 음성으로 안내 (이 PC)
+    #[serde(default = "yes")]
+    pub bed_voice: bool,
+    /// 치료실 보드 창을 켜 둠 (다시 켜도 열림, 이 PC)
+    #[serde(default)]
+    pub bed_board: bool,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -415,6 +481,8 @@ impl Default for Settings {
             cards_on_top: true,
             update_mode: UpdateMode::Auto,
             sync: SyncSettings::default(),
+            bed_voice: true,
+            bed_board: false,
         }
     }
 }
@@ -439,6 +507,9 @@ pub struct Data {
     /// 디데이
     #[serde(default)]
     pub ddays: Vec<Dday>,
+    /// 치료실 베드 프로그램
+    #[serde(default)]
+    pub bed_presets: Vec<BedPreset>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -807,6 +878,7 @@ impl Data {
             world: ["America/New_York", "Europe/London", "Asia/Tokyo"].iter().map(|t| WorldClock::new(t)).collect(),
             countdowns: vec![],
             ddays: vec![],
+            bed_presets: vec![],
         }
     }
 }

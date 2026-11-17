@@ -7,6 +7,7 @@
 //!     GET /api/show                         메인 창 열기
 //!     GET /api/world · /api/countdowns · /api/ddays   월드타임 · 카운트다운 · 디데이
 //!     GET /api/update[?do=check|apply]       자동 업데이트 상태 · 지금 확인 · 지금 업데이트
+//!     GET /api/beds · /api/bed?no=3&do=start&preset=침 15분&patient=…   치료실 베드 (do=start|clear|extend|pause|resume|toggle|skip, min=)
 //!     GET /api/sync[?mode=host|join|off&code=&host=&sound=on|off&find=1]   PC 연동 상태 · 설정 · 주변 찾기
 use crate::core::Core;
 use crate::engine::Cmd;
@@ -208,6 +209,39 @@ fn run(core: Arc<Core>) {
                         })
                         .collect(),
                 ))
+            }
+            "/api/beds" => {
+                if let Some(n) = get("count").and_then(|c| c.parse::<u32>().ok()).filter(|n| (1..=40).contains(n)) {
+                    core.ensure_beds(n);
+                }
+                Some(crate::ui::beds::beds_json(&core))
+            }
+            "/api/bed" => {
+                // ?no=3 (또는 id=) &do=start|clear|pause|resume|toggle|skip|extend &preset=이름 &min=분 &patient=이름
+                let id = get("id").and_then(|s| s.parse::<Id>().ok()).or_else(|| {
+                    let no: u32 = get("no")?.parse().ok()?;
+                    core.data().timers.iter().find(|t| t.bed.as_ref().map(|b| b.no) == Some(no)).map(|t| t.id)
+                });
+                match (id, get("do").as_deref()) {
+                    (Some(id), Some("start")) => {
+                        let patient = get("patient").unwrap_or_default();
+                        let preset = get("preset").and_then(|n| core.data().bed_presets.iter().find(|p| p.name == n).cloned());
+                        match (preset, get("min").and_then(|m| m.parse::<u32>().ok())) {
+                            (Some(p), _) => core.bed_start(id, &p.name, p.steps.clone(), &patient, "api"),
+                            (None, Some(m)) if m > 0 => core.bed_start(id, &format!("{m}분"), vec![crate::model::Step { name: "치료".into(), secs: m * 60, sound: "chime".into() }], &patient, "api"),
+                            _ => {}
+                        }
+                    }
+                    (Some(id), Some("clear")) => core.bed_clear(id, "api"),
+                    (Some(id), Some("extend")) => core.bed_extend(id, get("min").and_then(|m| m.parse().ok()).unwrap_or(5), "api"),
+                    (Some(id), Some(d)) => {
+                        if let Some(c) = Cmd::parse(d) {
+                            core.cmd(id, c, "api");
+                        }
+                    }
+                    _ => {}
+                }
+                Some(crate::ui::beds::beds_json(&core))
             }
             "/api/sync" => {
                 // 설정 바꾸기: ?mode=host|join|off &code= &host= &port= &sound=on|off

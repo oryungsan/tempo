@@ -80,11 +80,13 @@ pub struct Opts {
     /// true = 단계마다, false = 타이머 전체 끝나기 전(마지막 단계)만
     pub warn_each: bool,
     pub auto_advance: bool,
+    /// 끝나도 대기로 안 돌아감 (치료실 베드 — 비울 때까지 「끝」 + 초과 시간)
+    pub hold: bool,
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { repeat: false, warn: Duration::ZERO, warn_each: false, auto_advance: true }
+        Opts { repeat: false, warn: Duration::ZERO, warn_each: false, auto_advance: true, hold: false }
     }
 }
 
@@ -169,6 +171,11 @@ impl Engine {
         if self.idx >= self.durations.len() {
             self.idx = self.durations.len() - 1;
         }
+    }
+
+    /// 끝난 지 얼마나 (끝 상태일 때만)
+    pub fn done_elapsed(&self, now: Instant) -> Option<Duration> {
+        (self.phase == Phase::Done).then(|| self.done_at.map(|t| now.saturating_duration_since(t)).unwrap_or_default())
     }
 
     pub fn snapshot(&self, now: Instant, now_ms: i64) -> Snap {
@@ -365,7 +372,7 @@ impl Engine {
                     }
                 }
             }
-        } else if self.phase == Phase::Done {
+        } else if self.phase == Phase::Done && !self.opts.hold {
             if let Some(t) = self.done_at {
                 if now.saturating_duration_since(t) >= DONE_HOLD {
                     self.phase = Phase::Idle;
@@ -510,6 +517,29 @@ mod tests {
         let s2 = a.snapshot(now + Duration::from_secs(5), 1_005_000);
         b.restore(&s2, nb, 1_005_000);
         assert_eq!((b.phase, b.step_remaining(nb + Duration::from_secs(100)).as_secs()), (Phase::Paused, 40));
+    }
+
+
+    #[test]
+    fn hold_keeps_done_and_counts_overtime() {
+        let t0 = Instant::now();
+        let o = Opts { hold: true, ..Default::default() };
+        let mut e = Engine::with_opts(vec![Duration::from_secs(10)], o);
+        e.command(Cmd::Start, t0);
+        e.tick(t0 + Duration::from_secs(11));
+        assert_eq!(e.phase, Phase::Done);
+        // 8초 넘게 지나도 「끝」 그대로 + 초과 시간
+        e.tick(t0 + Duration::from_secs(40));
+        assert_eq!(e.phase, Phase::Done);
+        assert_eq!(e.done_elapsed(t0 + Duration::from_secs(40)).unwrap().as_secs(), 29);
+        // 보통 타이머는 대기로
+        let mut f = Engine::with_opts(vec![Duration::from_secs(10)], Opts::default());
+        f.command(Cmd::Start, t0);
+        f.tick(t0 + Duration::from_secs(11));
+        f.tick(t0 + Duration::from_secs(40));
+        assert_eq!(f.phase, Phase::Idle);
+        // 끝난 베드에서 다시 시작
+        assert_eq!(e.command(Cmd::Start, t0 + Duration::from_secs(41)), vec![Event::Started]);
     }
 
 }

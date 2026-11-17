@@ -54,6 +54,7 @@ pub fn items(d: &Data) -> BTreeMap<String, Value> {
     coll(&mut m, "c", &d.countdowns, |x| x.id, LOCAL_EVENT);
     coll(&mut m, "d", &d.ddays, |x| x.id, LOCAL_EVENT);
     coll(&mut m, "w", &d.world, |x| x.id, &[]);
+    coll(&mut m, "p", &d.bed_presets, |x| x.id, &[]);
     m
 }
 
@@ -129,6 +130,7 @@ pub fn apply_items(d: &mut Data, list: &[(String, Option<Value>)]) -> Vec<String
             "c" => upsert(&mut d.countdowns, id, |x| x.id, v, LOCAL_EVENT),
             "d" => upsert(&mut d.ddays, id, |x| x.id, v, LOCAL_EVENT),
             "w" => upsert(&mut d.world, id, |x| x.id, v, &[]),
+            "p" => upsert(&mut d.bed_presets, id, |x| x.id, v, &[]),
             _ => true,
         };
         if !ok {
@@ -144,6 +146,7 @@ pub fn apply_items(d: &mut Data, list: &[(String, Option<Value>)]) -> Vec<String
             "c" => reorder(&mut d.countdowns, &v, |x| x.id),
             "d" => reorder(&mut d.ddays, &v, |x| x.id),
             "w" => reorder(&mut d.world, &v, |x| x.id),
+            "p" => reorder(&mut d.bed_presets, &v, |x| x.id),
             _ => {}
         }
     }
@@ -160,6 +163,7 @@ fn natural_key(p: &str, v: &Value) -> Option<String> {
         "c" => format!("{}|{}", g("title"), g("target")),
         "d" => format!("{}|{}|{}", g("title"), g("date"), g("mode")),
         "w" => g("tz"),
+        "p" => g("name"),
         _ => return None,
     })
 }
@@ -890,7 +894,7 @@ pub fn fw_check_async() {
     });
 }
 
-fn b64(data: &[u8]) -> String {
+pub fn b64(data: &[u8]) -> String {
     const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut s = String::new();
     for c in data.chunks(3) {
@@ -1170,7 +1174,7 @@ fn conn(core: &Core, st: TcpStream, addr: String, s: &SyncSettings, host: bool, 
                         let now = now_ms();
                         with_store(|x| {
                             x.paired.push(peer_pc.clone());
-                            for p in ["t", "a", "m", "c", "d", "w"] {
+                            for p in ["t", "a", "m", "c", "d", "w", "p"] {
                                 x.revs.insert(format!("o:{p}"), now);
                             }
                         });

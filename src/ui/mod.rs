@@ -1,5 +1,6 @@
 //! 창 관리. 루트 뷰포트 = 보이지 않는 1px 호스트(늘 그려짐) — 메인 창·카드·알림 창은 모두 그 아래 자식 창.
 //! (메인 창을 닫아 트레이로 보내도 카드와 알림이 계속 갱신되게 하려는 구조)
+pub mod beds;
 pub mod card;
 pub mod clocks;
 pub mod drag;
@@ -38,6 +39,7 @@ pub struct App {
     main: main_win::MainState,
     cards: HashMap<Id, card::CardState>,
     ev_cards: HashMap<(bool, Id), event_card::EvCardState>,
+    board: beds::Board,
     _tray: Option<tray_icon::TrayIcon>,
     theme: Option<Theme>,
     /// 메인 창 제목 표시줄 색을 맞춘 테마 (창이 새로 열리면 None)
@@ -60,6 +62,7 @@ impl App {
             Some("stopwatch") => main_win::Page::Stopwatch,
             Some("settings") => main_win::Page::Settings,
             Some("reminders") => main_win::Page::Reminders,
+            Some("beds") => main_win::Page::Beds,
             Some("countdown") => main_win::Page::Countdown,
             Some("dday") => main_win::Page::Dday,
             Some("world") => main_win::Page::World,
@@ -101,7 +104,7 @@ impl App {
             main.page = main_win::Page::Alarms;
             main.alarm_edit = Some(editor::AlarmEdit::new(crate::model::AlarmDef::new(), true));
         }
-        App { core, main_open: o.show_main, main, cards: HashMap::new(), ev_cards: HashMap::new(), _tray: tray, theme: None, titlebar: None, last_frame: None }
+        App { core, main_open: o.show_main, main, cards: HashMap::new(), ev_cards: HashMap::new(), board: Default::default(), _tray: tray, theme: None, titlebar: None, last_frame: None }
     }
 
     fn default_card_pos(&self, stack_y: f32, k: f32, style: crate::model::Style) -> egui::Pos2 {
@@ -255,6 +258,10 @@ impl eframe::App for App {
         }
         self.ev_cards.retain(|key, _| ev_shown.contains(key));
 
+        // 치료실 보드 창
+        if settings.bed_board && !beds::board(ctx, &core, &mut self.board, &p) {
+            core.update_quiet(|d| d.settings.bed_board = false);
+        }
         ring::show(ctx, &core, &p);
         fx::edge(ctx, &core, &defs, &views, &p);
         let fx_live = fx::any_live(&core, &defs, &views);
@@ -267,7 +274,7 @@ impl eframe::App for App {
         // 초 단위로 바뀌는 화면 (카운트다운 · 월드타임) · 사이드바 고정 카운트다운
         let live_page = self.main_open && matches!(self.main.page, main_win::Page::Countdown | main_win::Page::World | main_win::Page::Dday);
         let pinned_cd = self.main_open && core.data().countdowns.iter().any(|c| c.pinned && !c.fired);
-        let busy = views.iter().any(|v| v.phase == Phase::Running) || !core.rings().is_empty() || self.main.sw.running() || live_page || pinned_cd || ev_live;
+        let busy = views.iter().any(|v| v.phase == Phase::Running || v.done_for.is_some()) || !core.rings().is_empty() || self.main.sw.running() || live_page || pinned_cd || ev_live;
         if bench {
             core.update_ms.lock().unwrap().push(t0.elapsed().as_secs_f32() * 1000.0);
             ctx.request_repaint();

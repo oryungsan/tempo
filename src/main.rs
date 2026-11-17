@@ -14,6 +14,7 @@ mod model;
 mod store;
 mod sync;
 mod todo;
+mod tts;
 mod tray;
 mod ui;
 mod update;

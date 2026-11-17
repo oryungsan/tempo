@@ -31,6 +31,8 @@ pub struct TimerView {
     /// 단계마다 멈춤 — 다음 단계 시작 대기 중
     pub waiting: bool,
     pub epoch: u64,
+    /// 끝난 지 얼마 (끝 상태일 때)
+    pub done_for: Option<Duration>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -304,6 +306,11 @@ impl Core {
                     x.id = n;
                 }
             }
+            for x in d.bed_presets.iter_mut() {
+                if let Some(n) = map("p", x.id) {
+                    x.id = n;
+                }
+            }
             if let Some(n) = d.settings.automation_timer.and_then(|a| map("t", a)) {
                 d.settings.automation_timer = Some(n);
             }
@@ -351,6 +358,7 @@ impl Core {
                     warn: Duration::from_secs(t.warn_secs as u64),
                     warn_each: t.warn_each,
                     auto_advance: t.auto_advance,
+                    hold: t.bed.is_some(),
                 };
                 (t.id, t.steps.iter().map(|s| Duration::from_secs(s.secs.max(1) as u64)).collect(), o)
             })
@@ -426,6 +434,81 @@ impl Core {
         }
         self.handle(id, ev, src);
         self.repaint();
+    }
+
+    // ── 치료실 베드 ─────────────────────────────────────────
+
+    /// 베드 수 맞추기 — 모자라면 만들고, 남으면 쉬고 있는 베드만 지움. 프로그램이 없으면 기본 프로그램
+    pub fn ensure_beds(&self, n: u32) {
+        self.update(|d| {
+            if d.bed_presets.is_empty() {
+                d.bed_presets = crate::model::BedPreset::defaults();
+            }
+            let have: Vec<u32> = d.timers.iter().filter_map(|t| t.bed.as_ref().map(|b| b.no)).collect();
+            for no in 1..=n {
+                if !have.contains(&no) {
+                    let mut t = TimerDef::simple(&format!("{no}번 베드"), 15 * 60, crate::model::PALETTE[(no as usize - 1) % crate::model::PALETTE.len()]);
+                    t.card = crate::model::CardMode::Off;
+                    t.notify = true;
+                    t.warn_secs = 30;
+                    t.warn_sound = "none".into(); // 베드 = 소리 없이 화면 효과만, 끝에 소리 · 음성
+                    t.bed = Some(crate::model::BedInfo { no, ..Default::default() });
+                    d.timers.push(t);
+                }
+            }
+            d.timers.retain(|t| t.bed.as_ref().map(|b| b.no <= n || !b.patient.is_empty() || !b.program.is_empty()).unwrap_or(true));
+        });
+    }
+
+    /// 베드 시작 — 프로그램(단계들) · 환자
+    pub fn bed_start(&self, id: Id, program: &str, steps: Vec<crate::model::Step>, patient: &str, src: &str) {
+        if steps.is_empty() {
+            return;
+        }
+        let (program, patient) = (program.to_string(), patient.trim().to_string());
+        self.update(|d| {
+            if let Some(t) = d.timers.iter_mut().find(|t| t.id == id) {
+                t.steps = steps;
+                if let Some(b) = t.bed.as_mut() {
+                    b.program = program;
+                    b.patient = patient;
+                }
+            }
+        });
+        self.dismiss(RingKind::Timer(id));
+        if self.view(id).map(|v| v.phase != Phase::Idle).unwrap_or(false) {
+            self.cmd(id, Cmd::Reset, src);
+        }
+        self.cmd(id, Cmd::Start, src);
+    }
+
+    /// 베드 비우기 — 처음으로 + 환자 · 프로그램 지움
+    pub fn bed_clear(&self, id: Id, src: &str) {
+        self.dismiss(RingKind::Timer(id));
+        self.cmd(id, Cmd::Reset, src);
+        self.update(|d| {
+            if let Some(b) = d.timers.iter_mut().find(|t| t.id == id).and_then(|t| t.bed.as_mut()) {
+                b.patient.clear();
+                b.program.clear();
+            }
+        });
+    }
+
+    /// N분 더 — 진행 중이면 마지막 단계를 늘림, 끝났으면 「연장」 단계로 다시 시작
+    pub fn bed_extend(&self, id: Id, mins: u32, src: &str) {
+        let Some(v) = self.view(id) else { return };
+        if v.phase == Phase::Done || v.phase == Phase::Idle {
+            let (prog, pat) = self.data().timers.iter().find(|t| t.id == id).and_then(|t| t.bed.clone()).map(|b| (b.program, b.patient)).unwrap_or_default();
+            let prog = if prog.is_empty() { format!("{mins}분") } else if prog.ends_with("연장") { prog } else { format!("{prog} · 연장") };
+            self.bed_start(id, &prog, vec![crate::model::Step { name: "연장".into(), secs: mins * 60, sound: "chime".into() }], &pat, src);
+        } else {
+            self.update(|d| {
+                if let Some(s) = d.timers.iter_mut().find(|t| t.id == id).and_then(|t| t.steps.last_mut()) {
+                    s.secs += mins * 60;
+                }
+            });
+            log(format!("{} +{mins}분 ({src})", self.timer_name(id)));
+        }
     }
 
     /// 모래시계 뒤집기 — 대기·완료면 시작, 진행 중이면 지금 단계를 처음부터 (일시정지였으면 이어서)
@@ -525,7 +608,21 @@ impl Core {
                     log(format!("{} finished", t.name));
                     self.add_stat(id, |st| st.completes += 1);
                     // 다른 PC 에서 시작한 타이머는 설정을 켠 PC 에서만 완료 창 (소리와 같은 설정)
-                    if t.notify && !muted {
+                    if let Some(b) = &t.bed {
+                        if !muted {
+                            let mut sub = vec![];
+                            if !b.patient.trim().is_empty() {
+                                sub.push(b.patient.trim().to_string());
+                            }
+                            if !b.program.is_empty() {
+                                sub.push(format!("{} 끝", b.program));
+                            }
+                            self.push_ring(RingKind::Timer(id), format!("{} 끝", t.name), if sub.is_empty() { "치료 끝".into() } else { sub.join(" · ") }, None);
+                            if self.data().settings.bed_voice {
+                                crate::tts::speak(&format!("{} 치료가 끝났습니다", t.name), self.data().settings.volume);
+                            }
+                        }
+                    } else if t.notify && !muted {
                         self.push_ring(RingKind::Timer(id), "타이머 완료".into(), t.name.clone(), None);
                     }
                 }
@@ -1051,6 +1148,7 @@ fn make_view(t: &TimerDef, e: &Engine, now: Instant) -> TimerView {
         loops: e.loops,
         waiting: e.waiting,
         epoch: e.epoch,
+        done_for: e.done_elapsed(now),
     }
 }
 

@@ -221,6 +221,7 @@ mod tests {
             loops: 0,
             waiting: false,
             epoch: 0,
+            done_for: None,
         }
     }
 

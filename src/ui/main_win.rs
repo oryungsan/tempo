@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Copy, PartialEq)]
 pub enum Page {
     Timers,
+    Beds,
     Alarms,
     Reminders,
     Stopwatch,
@@ -49,11 +50,12 @@ pub struct MainState {
     pub focus: Option<Id>,
     pub rem: super::reminders::RemState,
     pub clk: super::clocks::ClockState,
+    pub beds: super::beds::BedState,
 }
 
 impl MainState {
     pub fn new() -> Self {
-        MainState { page: Page::Timers, timer_edit: None, alarm_edit: None, sw: Stopwatch::default(), slot: Default::default(), reset_cards: false, focus: None, rem: Default::default(), clk: Default::default() }
+        MainState { page: Page::Timers, timer_edit: None, alarm_edit: None, sw: Stopwatch::default(), slot: Default::default(), reset_cards: false, focus: None, rem: Default::default(), clk: Default::default(), beds: Default::default() }
     }
 
     /// 카운트다운 · 디데이 카드에서 「편집」 → 그 페이지 + 편집 창
@@ -113,11 +115,13 @@ pub fn ui(ctx: &egui::Context, core: &Arc<Core>, st: &mut MainState, p: &Pal) {
             Page::Stopwatch => stopwatch_page(ui, st, p),
             Page::Settings => settings_page(ui, core, st, p),
             Page::Reminders => super::reminders::page(ui, core, &mut st.rem, p),
+            Page::Beds => super::beds::page(ui, core, &mut st.beds, p),
             Page::Countdown => super::clocks::countdown_page(ui, core, &mut st.clk, p),
             Page::Dday => super::clocks::dday_page(ui, core, &mut st.clk, p),
             Page::World => super::clocks::world_page(ui, core, &mut st.clk, p),
         });
     st.clk.modals(ctx, core, p, &st.slot);
+    st.beds.modals(ctx, core, p);
     if let Some(e) = st.timer_edit.as_mut() {
         if let Outcome::Close = e.ui(ctx, core, p, &st.slot) {
             st.timer_edit = None;
@@ -180,11 +184,14 @@ fn sidebar(ctx: &egui::Context, core: &Arc<Core>, st: &mut MainState, p: &Pal, v
                 });
             });
             ui.add_space(22.0);
-            let running = views.iter().filter(|v| v.phase.active()).count();
+            let bed_ids: Vec<Id> = core.data().timers.iter().filter(|t| t.bed.is_some()).map(|t| t.id).collect();
+            let running = views.iter().filter(|v| v.phase.active() && !bed_ids.contains(&v.id)).count();
+            let bed_busy = views.iter().filter(|v| (v.phase.active() || v.phase == Phase::Done) && bed_ids.contains(&v.id)).count();
             let alarms_on = core.data().alarms.iter().filter(|a| a.enabled).count();
             let sw_on = st.sw.running();
             for (page, icon, label, badge) in [
                 (Page::Timers, "⏳", "타이머", if running > 0 { format!("{running}") } else { String::new() }),
+                (Page::Beds, "🏥", "치료실", if bed_busy > 0 { format!("{bed_busy}") } else { String::new() }),
                 (Page::Alarms, "⏰", "알람", if alarms_on > 0 { format!("{alarms_on}") } else { String::new() }),
                 (Page::Reminders, "☑", "리마인더", { let n = super::reminders::badge(core); if n > 0 { format!("{n}") } else { String::new() } }),
                 (Page::Stopwatch, "⏱", "스톱워치", if sw_on { "●".into() } else { String::new() }),
@@ -241,7 +248,8 @@ fn sidebar(ctx: &egui::Context, core: &Arc<Core>, st: &mut MainState, p: &Pal, v
                     }
                 }
                 let mut rows: Vec<(Color32, String, String, Color32)> = Vec::new();
-                for v in views.iter().filter(|v| v.phase.active()).take(3) {
+                let bed_ids: Vec<Id> = core.data().timers.iter().filter(|t| t.bed.is_some()).map(|t| t.id).collect();
+                for v in views.iter().filter(|v| v.phase.active() && !bed_ids.contains(&v.id)).take(3) {
                     let rem = if v.n > 1 { v.step_rem } else { v.total_rem };
                     rows.push((color_of(&v.color), v.name.clone(), mmss(rem), if v.phase == Phase::Paused { p.amber } else { p.text }));
                 }
@@ -313,7 +321,7 @@ fn page_header(ui: &mut Ui, p: &Pal, title: &str, sub: &str, action: Option<&str
 // ── 타이머 ─────────────────────────────────────────────────
 
 fn timers_page(ui: &mut Ui, core: &Arc<Core>, st: &mut MainState, p: &Pal, views: &[TimerView]) {
-    let defs: Vec<TimerDef> = core.data().timers.clone();
+    let defs: Vec<TimerDef> = core.data().timers.iter().filter(|t| t.bed.is_none()).cloned().collect();
     let global_style = core.data().settings.style;
     if let Some(fid) = st.focus {
         if let (Some(def), Some(v)) = (defs.iter().find(|t| t.id == fid), views.iter().find(|v| v.id == fid)) {
@@ -833,6 +841,18 @@ fn settings_page(ui: &mut Ui, core: &Arc<Core>, st: &mut MainState, p: &Pal) {
                 .color(p.faint)
                 .size(12.0),
             );
+        });
+        section(ui, p, "치료실", |ui| {
+            row(ui, p, "베드 치료가 끝나면 음성 안내", "「3번 베드 치료가 끝났습니다」 — Windows 한국어 음성, 볼륨은 위 「소리」 볼륨", |ui| {
+                if ghost(ui, p, "들어 보기").clicked() {
+                    crate::tts::speak("3번 베드 치료가 끝났습니다", s.volume.max(0.3));
+                }
+                toggle(ui, p, &mut s.bed_voice);
+            });
+            ui.separator();
+            row(ui, p, "치료실 보드 창", "치료실 모니터 · TV 에 크게 띄우는 베드 판 (F11 전체 화면). 켜 두면 Tempo 를 다시 켜도 열립니다", |ui| {
+                toggle(ui, p, &mut s.bed_board);
+            });
         });
         section(ui, p, "PC 연동", |ui| sync_section(ui, p, &mut s.sync));
         section(ui, p, "업데이트", |ui| update_section(ui, core, p, &mut s.update_mode));
