@@ -12,6 +12,7 @@ mod engine;
 mod hotkey;
 mod model;
 mod store;
+mod sync;
 mod todo;
 mod tray;
 mod ui;
@@ -26,7 +27,11 @@ use std::time::Duration;
 fn already_running() -> bool {
     use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
     use windows_sys::Win32::System::Threading::CreateMutexW;
-    let tag = if std::env::var_os("TEMPO_DIR").is_some() { "Test" } else { "" };
+    // 시험용 데이터 폴더마다 따로 (여러 개 동시에 띄우기)
+    let tag = match std::env::var("TEMPO_DIR") {
+        Ok(d) => format!("Test{:x}", d.bytes().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64))),
+        Err(_) => String::new(),
+    };
     let name: Vec<u16> = format!("Local\\TempoAlarmTimerSingleInstance{tag}\0").encode_utf16().collect();
     let h = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
     !h.is_null() && unsafe { GetLastError() } == ERROR_ALREADY_EXISTS
@@ -90,6 +95,7 @@ fn main() {
     api::spawn(core.clone());
     todo::spawn(core.clone());
     update::spawn(core.clone());
+    sync::spawn(core.clone());
     {
         let core = core.clone();
         std::thread::Builder::new()

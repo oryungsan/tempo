@@ -226,7 +226,9 @@ fn sidebar(ctx: &egui::Context, core: &Arc<Core>, st: &mut MainState, p: &Pal, v
                 let now = chrono::Local::now();
                 const WD: [&str; 7] = ["월", "화", "수", "목", "금", "토", "일"];
                 let wd = WD[chrono::Datelike::weekday(&now).num_days_from_monday() as usize];
-                ui.label(RichText::new(format!("{} {wd}요일", now.format("%m월 %d일"))).color(p.faint).size(12.0));
+                let peers = crate::sync::peers();
+                let date_line = if peers.is_empty() { format!("{} {wd}요일", now.format("%m월 %d일")) } else { format!("{} {wd}요일 · ⇄ {}", now.format("%m월 %d일"), peers.iter().map(|x| x.0.clone()).collect::<Vec<_>>().join(", ")) };
+                ui.label(RichText::new(date_line).color(p.faint).size(12.0));
                 ui.label(RichText::new(now.format("%H:%M").to_string()).font(digits(26.0)).color(p.muted));
                 ui.add_space(6.0);
                 let ready = core.update_state.lock().unwrap().ready.clone();
@@ -823,6 +825,7 @@ fn settings_page(ui: &mut Ui, core: &Arc<Core>, st: &mut MainState, p: &Pal) {
                 .size(12.0),
             );
         });
+        section(ui, p, "PC 연동", |ui| sync_section(ui, p, &mut s.sync));
         section(ui, p, "업데이트", |ui| update_section(ui, core, p, &mut s.update_mode));
         section(ui, p, "데이터", |ui| {
             ui.horizontal(|ui| {
@@ -986,6 +989,64 @@ fn style_grid(ui: &mut Ui, p: &Pal, style: &mut Style) {
             }
         }
     });
+}
+
+/// 설정 — PC 연동
+fn sync_section(ui: &mut Ui, p: &Pal, s: &mut crate::model::SyncSettings) {
+    use crate::model::SyncMode;
+    ui.label(RichText::new("Tempo 가 깔린 다른 PC 와 타이머 · 알람 · 리마인더 · 카운트다운 · 디데이 · 월드타임과 타이머 진행 상태를 똑같이 맞춥니다. 한 PC 는 호스트, 나머지는 참여로 두고 같은 연동 코드를 넣으세요. 카드 위치 · 테마 · 볼륨은 PC 마다 따로입니다.").color(p.muted).size(12.5));
+    ui.add_space(6.0);
+    row(ui, p, "이 PC", "", |ui| {
+        let before = s.mode;
+        segmented(ui, p, &mut s.mode, &[(SyncMode::Off, "끔"), (SyncMode::Host, "호스트"), (SyncMode::Join, "참여")]);
+        if s.mode == SyncMode::Host && before != SyncMode::Host && s.code.trim().is_empty() {
+            s.code = crate::sync::new_code();
+        }
+    });
+    let st = crate::sync::status();
+    if s.mode != SyncMode::Off {
+        ui.separator();
+        let (txt, col) = match &st.error {
+            Some(e) if crate::sync::peers().is_empty() => (format!("{} · {e}", st.state), p.amber),
+            _ => (st.state.clone(), if crate::sync::peers().is_empty() { p.muted } else { p.green }),
+        };
+        ui.label(RichText::new(txt).color(col).size(13.0));
+        for (n, a, t) in crate::sync::peers() {
+            ui.label(RichText::new(format!("⇄ {n}  ({a}) · {} 부터", t.format("%H:%M"))).color(p.text).size(12.5));
+        }
+        ui.separator();
+    }
+    match s.mode {
+        SyncMode::Host => {
+            row(ui, p, "연동 코드", "참여할 PC 에 이 코드를 넣으세요", |ui| {
+                if ghost(ui, p, "새 코드").clicked() {
+                    s.code = crate::sync::new_code();
+                }
+                if ghost(ui, p, "복사").clicked() {
+                    ui.ctx().copy_text(s.code.clone());
+                }
+                ui.label(RichText::new(&s.code).font(digits(22.0)).color(p.accent));
+            });
+            let ip = crate::sync::lan_ip().unwrap_or_else(|| "?".into());
+            ui.label(RichText::new(format!("참여 PC 에 넣을 호스트 주소: {ip}  (또는 컴퓨터 이름 {})  · 포트 {}", crate::sync::pc_name(), s.port)).color(p.faint).size(12.0));
+        }
+        SyncMode::Join => {
+            row(ui, p, "호스트 주소", "호스트 PC 의 IP · 컴퓨터 이름 · Tailscale 이름", |ui| {
+                ui.add(egui::TextEdit::singleline(&mut s.host).desired_width(220.0).hint_text("예: 192.168.0.10"));
+            });
+            row(ui, p, "연동 코드", "호스트 PC 설정에 보이는 8자리", |ui| {
+                ui.add(egui::TextEdit::singleline(&mut s.code).desired_width(160.0).hint_text("ABCD2345"));
+            });
+            ui.label(RichText::new("처음 연결하면 두 PC 를 합칩니다 — 이름이 같은 타이머는 호스트 것 하나로, 나머지는 양쪽에 추가 (이 PC 의 원래 데이터는 data.before-sync-….json 으로 보관)").color(p.faint).size(12.0));
+        }
+        SyncMode::Off => {}
+    }
+    if s.mode != SyncMode::Off {
+        ui.separator();
+        row(ui, p, "다른 PC 에서 시작한 타이머 소리 · 완료 창", "끄면 화면 · 카드만 같이 움직이고 단계 벨 · 카운트다운 소리 · 완료 창은 시작한 PC 에서만", |ui| {
+            toggle(ui, p, &mut s.remote_sound);
+        });
+    }
 }
 
 /// 설정 — 자동 업데이트

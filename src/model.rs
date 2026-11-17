@@ -39,6 +39,7 @@ pub struct TimerDef {
     /// 끝나면 처음부터 다시
     #[serde(default)]
     pub repeat: bool,
+    #[serde(default = "when_active")]
     pub card: CardMode,
     /// 끝나면 알림 창
     #[serde(default)]
@@ -140,6 +141,10 @@ impl Pomo {
         }
         v
     }
+}
+
+fn when_active() -> CardMode {
+    CardMode::WhenActive
 }
 
 fn one() -> u32 {
@@ -286,6 +291,44 @@ pub struct Settings {
     /// 새 버전 자동 업데이트
     #[serde(default = "upd_auto")]
     pub update_mode: UpdateMode,
+    /// PC 연동
+    #[serde(default)]
+    pub sync: SyncSettings,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SyncMode {
+    Off,
+    /// 이 PC 가 다른 PC 의 연결을 받음
+    Host,
+    /// 호스트 PC 에 연결
+    Join,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SyncSettings {
+    pub mode: SyncMode,
+    /// 연동 코드 (양쪽 같아야 연결)
+    #[serde(default)]
+    pub code: String,
+    /// 참여: 호스트 주소 (IP · 컴퓨터 이름 · Tailscale 이름)
+    #[serde(default)]
+    pub host: String,
+    #[serde(default = "sync_port")]
+    pub port: u16,
+    /// 다른 PC 에서 시작한 타이머의 소리도 이 PC 에서 냄
+    #[serde(default)]
+    pub remote_sound: bool,
+}
+
+fn sync_port() -> u16 {
+    47840
+}
+
+impl Default for SyncSettings {
+    fn default() -> Self {
+        SyncSettings { mode: SyncMode::Off, code: String::new(), host: String::new(), port: sync_port(), remote_sound: false }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -322,6 +365,7 @@ impl Default for Settings {
             main_on_top: false,
             cards_on_top: true,
             update_mode: UpdateMode::Auto,
+            sync: SyncSettings::default(),
         }
     }
 }

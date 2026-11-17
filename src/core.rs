@@ -4,7 +4,7 @@ use crate::audio::{self, PlayOpts};
 use crate::engine::{unix_now, Cmd, Engine, Event, Opts, Phase};
 use crate::model::{AlarmDef, Data, Id, Reminder, Repeat, TimerDef};
 use crate::store::{self, log};
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, TimeZone};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -74,6 +74,8 @@ fn stats_path() -> std::path::PathBuf {
 struct AlarmRt {
     next: Option<DateTime<Local>>,
     snooze: Option<DateTime<Local>>,
+    /// 이 PC 에서 마지막으로 울린 시각 (연동: 다른 PC 가 먼저 울리고 끈 일회성 알람 판단)
+    rang: Option<DateTime<Local>>,
 }
 
 pub struct Core {
@@ -177,11 +179,14 @@ impl Core {
     /// 데이터 바꾸기 → 저장 · 실행 상태 맞추기 · 단축키 다시 등록
     pub fn update(&self, f: impl FnOnce(&mut Data)) {
         let hk_before = self.hotkey_sig();
-        {
+        let (before, after) = {
             let mut d = self.data();
+            let before = crate::sync::items(&d);
             f(&mut d);
             store::save(&d);
-        }
+            (before, crate::sync::items(&d))
+        };
+        crate::sync::local_diff(&before, &after);
         self.sync_runtime();
         if self.hotkey_sig() != hk_before {
             self.reload_hotkeys();
@@ -191,9 +196,132 @@ impl Core {
 
     /// 창 위치처럼 자주 바뀌는 값 — 저장만
     pub fn update_quiet(&self, f: impl FnOnce(&mut Data)) {
-        let mut d = self.data();
-        f(&mut d);
-        store::save(&d);
+        let (before, after) = {
+            let mut d = self.data();
+            let before = crate::sync::items(&d);
+            f(&mut d);
+            store::save(&d);
+            (before, crate::sync::items(&d))
+        };
+        crate::sync::local_diff(&before, &after);
+    }
+
+    // ── PC 연동 ───────────────────────────────────────────
+
+    /// 연동용 실행 상태
+    pub fn run_snap(&self, id: Id) -> Option<crate::engine::Snap> {
+        self.rt.lock().unwrap().get(&id).map(|e| e.snapshot(Instant::now(), crate::sync::now_ms()))
+    }
+
+    /// 다른 PC 에서 온 변경 — 다시 보내지 않음
+    pub fn apply_remote(&self, items: &[(String, Option<serde_json::Value>)], runs: &[(Id, crate::engine::Snap)], now_ms: i64) -> Vec<String> {
+        let hk_before = self.hotkey_sig();
+        let alarms_before: Vec<AlarmDef> = self.data().alarms.clone();
+        let mut failed = Vec::new();
+        if !items.is_empty() {
+            let mut d = self.data();
+            failed = crate::sync::apply_items(&mut d, items);
+            store::save(&d);
+        }
+        self.sync_runtime();
+        if self.hotkey_sig() != hk_before {
+            self.reload_hotkeys();
+        }
+        if !runs.is_empty() {
+            let now = Instant::now();
+            let mut stopped = Vec::new();
+            {
+                let mut rt = self.rt.lock().unwrap();
+                for (id, sn) in runs {
+                    if let Some(e) = rt.get_mut(id) {
+                        let was = e.phase;
+                        e.restore(sn, now, now_ms);
+                        if e.phase.active() && !was.active() {
+                            self.hidden_cards.lock().unwrap().remove(id);
+                        }
+                        if !e.phase.active() {
+                            stopped.push(*id);
+                        }
+                    }
+                }
+            }
+            // 다른 PC 에서 멈춤 · 처음으로 → 이 PC 의 완료 알림도 닫음
+            for id in stopped {
+                self.dismiss_remote(RingKind::Timer(id));
+            }
+            for (id, sn) in runs {
+                log(format!("{} synced from other PC: {}", self.timer_name(*id), sn.phase));
+            }
+        }
+        if !items.is_empty() {
+            log(format!("sync: applied {} item(s) from other PC", items.len() - failed.len()));
+            self.catch_remote_alarms(&alarms_before);
+        }
+        self.repaint();
+        failed
+    }
+
+    /// 처음 합치기: 다른 PC(호스트)와 같은 항목은 이 PC 것을 빼고(호스트 것이 들어옴), 연동 타이머 · 단축키 맞춤
+    pub fn merge_local(&self, remap: &[(String, Id, Id)], host_hotkeys: &[String]) {
+        {
+            let mut d = self.data();
+            let path = store::dir().join(format!("data.before-sync-{}.json", Local::now().format("%Y%m%d-%H%M%S")));
+            if let Ok(j) = serde_json::to_string_pretty(&*d) {
+                let _ = std::fs::write(&path, j);
+            }
+            // 같은 항목 = 이 PC 것의 id 를 호스트 id 로 (카드 위치 같은 PC 별 값은 유지, 내용은 곧 호스트 것으로)
+            let map = |p: &str, id: Id| remap.iter().find(|r| r.0 == p && r.1 == id).map(|r| r.2);
+            for x in d.timers.iter_mut() {
+                if let Some(n) = map("t", x.id) {
+                    x.id = n;
+                }
+            }
+            for x in d.alarms.iter_mut() {
+                if let Some(n) = map("a", x.id) {
+                    x.id = n;
+                }
+            }
+            for x in d.reminders.iter_mut() {
+                if let Some(n) = map("m", x.id) {
+                    x.id = n;
+                }
+            }
+            for x in d.countdowns.iter_mut() {
+                if let Some(n) = map("c", x.id) {
+                    x.id = n;
+                }
+            }
+            for x in d.ddays.iter_mut() {
+                if let Some(n) = map("d", x.id) {
+                    x.id = n;
+                }
+            }
+            for x in d.world.iter_mut() {
+                if let Some(n) = map("w", x.id) {
+                    x.id = n;
+                }
+            }
+            if let Some(n) = d.settings.automation_timer.and_then(|a| map("t", a)) {
+                d.settings.automation_timer = Some(n);
+            }
+            // 남은 이 PC 타이머의 단축키가 호스트 타이머와 겹치면 비움
+            for t in d.timers.iter_mut().filter(|t| !remap.iter().any(|r| r.0 == "t" && r.2 == t.id)) {
+                if host_hotkeys.contains(&t.hotkey_toggle) {
+                    t.hotkey_toggle.clear();
+                }
+                if host_hotkeys.contains(&t.hotkey_reset) {
+                    t.hotkey_reset.clear();
+                }
+            }
+            store::save(&d);
+            log(format!("sync merge: backup {}", path.display()));
+        }
+        self.sync_runtime();
+    }
+
+    /// 다른 PC 에서 닫은 알림
+    pub fn dismiss_remote(&self, kind: RingKind) {
+        self.dismiss_ex(kind, false);
     }
 
     fn hotkey_sig(&self) -> Vec<(Id, String, String)> {
@@ -290,6 +418,8 @@ impl Core {
         }
         if ev.is_empty() {
             log(format!("{} {c:?} ({src}) -> no change", self.timer_name(id)));
+        } else if let Some(sn) = self.run_snap(id) {
+            crate::sync::local_run(id, &sn);
         }
         self.handle(id, ev, src);
         self.repaint();
@@ -366,6 +496,8 @@ impl Core {
     fn handle(&self, id: Id, ev: Vec<Event>, src: &str) {
         let Some(t) = self.data().timers.iter().find(|t| t.id == id).cloned() else { return };
         let mut sound: Option<usize> = None;
+        // 다른 PC 에서 시작한 타이머 — 이 PC 소리는 설정에 따라
+        let muted = crate::sync::remote_run(id) && !self.data().settings.sync.remote_sound;
         for e in &ev {
             match e {
                 Event::Started => {
@@ -389,7 +521,8 @@ impl Core {
                 Event::Finished => {
                     log(format!("{} finished", t.name));
                     self.add_stat(id, |st| st.completes += 1);
-                    if t.notify {
+                    // 다른 PC 에서 시작한 타이머는 설정을 켠 PC 에서만 완료 창 (소리와 같은 설정)
+                    if t.notify && !muted {
                         self.push_ring(RingKind::Timer(id), "타이머 완료".into(), t.name.clone(), None);
                     }
                 }
@@ -398,6 +531,7 @@ impl Core {
                     self.add_stat(id, |st| st.completes += 1);
                 }
                 Event::Jumped(i) => log(format!("{} jump to step {} ({src})", t.name, i + 1)),
+                Event::Warn(_, _) if muted => {}
                 Event::Warn(i, s) => {
                     if *s == t.warn_secs {
                         log(format!("{} countdown {}s before end of step {}", t.name, s, i + 1));
@@ -420,7 +554,7 @@ impl Core {
             }
         }
         // 절전 복귀 등으로 여러 단계를 한 번에 넘으면 소리는 마지막 한 번만
-        if let Some(i) = sound {
+        if let Some(i) = sound.filter(|_| !muted) {
             if let Some(s) = t.steps.get(i) {
                 let vol = self.data().settings.volume;
                 audio::play(&s.sound, PlayOpts { volume: vol, repeat: t.sound_repeat, looping: false, max: Duration::ZERO });
@@ -472,15 +606,24 @@ impl Core {
     }
 
     pub fn dismiss(&self, kind: RingKind) {
+        self.dismiss_ex(kind, true);
+    }
+
+    fn dismiss_ex(&self, kind: RingKind, broadcast: bool) {
         let mut rings = self.rings.lock().unwrap();
+        let mut removed = false;
         if let Some(i) = rings.iter().position(|r| r.kind == kind) {
             rings[i].stop.store(true, Ordering::Relaxed);
             rings.remove(i);
+            removed = true;
             if let RingKind::Alarm(id) = kind {
                 log(format!("alarm {id} dismissed"));
             }
         }
         drop(rings);
+        if removed && broadcast {
+            crate::sync::local_ring_off(kind);
+        }
         self.repaint();
     }
 
@@ -778,6 +921,37 @@ impl Core {
         }
     }
 
+    fn ring_alarm(&self, a: &AlarmDef) {
+        self.alarm_rt.lock().unwrap().entry(a.id).or_default().rang = Some(Local::now());
+        let title = format!("{:02}:{:02}", a.hour, a.minute);
+        let sub = if a.label.trim().is_empty() { "알람".to_string() } else { a.label.clone() };
+        log(format!("alarm {title} '{sub}' ringing"));
+        self.push_ring(RingKind::Alarm(a.id), title, sub, Some(a.sound.clone()));
+    }
+
+    /// 연동: 다른 PC 가 방금 울리고 끈 일회성 알람 — 이 PC 가 아직 안 울렸으면 같이 울림
+    fn catch_remote_alarms(&self, before: &[AlarmDef]) {
+        let now = Local::now();
+        let after: Vec<AlarmDef> = self.data().alarms.clone();
+        for a in after.iter().filter(|a| !a.enabled && !a.days.iter().any(|d| *d)) {
+            let Some(old) = before.iter().find(|b| b.id == a.id) else { continue };
+            if !old.enabled {
+                continue;
+            }
+            // 오늘 그 시각이 지금부터 2분 안쪽으로 지났나
+            let Some(t) = now.date_naive().and_hms_opt(a.hour, a.minute, 0).and_then(|t| Local.from_local_datetime(&t).earliest()) else { continue };
+            let ago = now - t;
+            if ago < chrono::Duration::zero() || ago > chrono::Duration::minutes(2) {
+                continue;
+            }
+            let rang = self.alarm_rt.lock().unwrap().get(&a.id).and_then(|r| r.rang).map(|r| now - r < chrono::Duration::minutes(3)).unwrap_or(false);
+            if !rang {
+                log(format!("alarm {} rang on other PC — ringing here too", a.id));
+                self.ring_alarm(a);
+            }
+        }
+    }
+
     fn tick_alarms(&self) {
         let now = Local::now();
         let alarms: Vec<AlarmDef> = self.data().alarms.iter().filter(|a| a.enabled).cloned().collect();
@@ -816,10 +990,7 @@ impl Core {
             }
         }
         for a in fire {
-            let title = format!("{:02}:{:02}", a.hour, a.minute);
-            let sub = if a.label.trim().is_empty() { "알람".to_string() } else { a.label.clone() };
-            log(format!("alarm {title} '{sub}' ringing"));
-            self.push_ring(RingKind::Alarm(a.id), title, sub, Some(a.sound.clone()));
+            self.ring_alarm(&a);
         }
         if !disable.is_empty() {
             self.update(|d| {

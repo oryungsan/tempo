@@ -108,6 +108,31 @@ pub struct Engine {
     pub epoch: u64,
 }
 
+/// PC 연동용 실행 상태 — Instant 대신 실제 시각(ms)으로
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Snap {
+    pub phase: String,
+    pub idx: usize,
+    pub acc_ms: u64,
+    /// 지금 단계가 (다시) 흐르기 시작한 시각 — 일시정지면 None
+    pub since_ms: Option<i64>,
+    pub done_ms: Option<i64>,
+    pub waiting: bool,
+    pub loops: u32,
+    pub chain_start: i64,
+}
+
+impl Phase {
+    pub fn parse(s: &str) -> Phase {
+        match s {
+            "running" => Phase::Running,
+            "paused" => Phase::Paused,
+            "done" => Phase::Done,
+            _ => Phase::Idle,
+        }
+    }
+}
+
 pub fn unix_now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
@@ -144,6 +169,35 @@ impl Engine {
         if self.idx >= self.durations.len() {
             self.idx = self.durations.len() - 1;
         }
+    }
+
+    pub fn snapshot(&self, now: Instant, now_ms: i64) -> Snap {
+        let to_ms = |t: Instant| now_ms - now.saturating_duration_since(t).as_millis() as i64;
+        Snap {
+            phase: self.phase.as_str().into(),
+            idx: self.idx,
+            acc_ms: self.acc.as_millis() as u64,
+            since_ms: self.since.map(to_ms),
+            done_ms: self.done_at.map(to_ms),
+            waiting: self.waiting,
+            loops: self.loops,
+            chain_start: self.chain_start_unix,
+        }
+    }
+
+    /// 다른 PC 의 실행 상태로 맞춤 (시각은 이미 이 PC 시계로 바꿔서 줌)
+    pub fn restore(&mut self, s: &Snap, now: Instant, now_ms: i64) {
+        let to_inst = |t: i64| now.checked_sub(Duration::from_millis((now_ms - t).max(0) as u64)).unwrap_or(now);
+        self.phase = Phase::parse(&s.phase);
+        self.epoch += 1;
+        self.idx = s.idx.min(self.durations.len() - 1);
+        self.acc = Duration::from_millis(s.acc_ms);
+        self.since = if self.phase == Phase::Running { Some(s.since_ms.map(to_inst).unwrap_or(now)) } else { None };
+        self.done_at = if self.phase == Phase::Done { Some(s.done_ms.map(to_inst).unwrap_or(now)) } else { None };
+        self.waiting = s.waiting;
+        self.loops = s.loops;
+        self.chain_start_unix = s.chain_start;
+        self.last_tick = None;
     }
 
     pub fn step_elapsed(&self, now: Instant) -> Duration {
@@ -436,4 +490,26 @@ mod tests {
         assert_eq!(e.tick(at(t0, 25_000)), vec![Event::StepEnded(1), Event::Looped, Event::Waiting(0)]);
         assert_eq!((e.idx, e.loops, e.phase), (0, 1, Phase::Paused));
     }
+
+    #[test]
+    fn snapshot_roundtrip_wall_clock() {
+        let t0 = Instant::now();
+        let mut a = Engine::with_opts(vec![Duration::from_secs(60), Duration::from_secs(30)], Opts::default());
+        a.command(Cmd::Start, t0);
+        let now = t0 + Duration::from_secs(20);
+        let snap = a.snapshot(now, 1_000_000);
+        assert_eq!(snap.since_ms, Some(1_000_000 - 20_000));
+        // 다른 PC: 같은 실제 시각이면 남은 시간이 같음
+        let mut b = Engine::with_opts(vec![Duration::from_secs(60), Duration::from_secs(30)], Opts::default());
+        let nb = Instant::now();
+        b.restore(&snap, nb, 1_000_000);
+        assert_eq!(b.phase, Phase::Running);
+        assert_eq!(b.step_remaining(nb).as_secs(), 40);
+        // 일시정지 상태도
+        a.command(Cmd::Pause, now);
+        let s2 = a.snapshot(now + Duration::from_secs(5), 1_005_000);
+        b.restore(&s2, nb, 1_005_000);
+        assert_eq!((b.phase, b.step_remaining(nb + Duration::from_secs(100)).as_secs()), (Phase::Paused, 40));
+    }
+
 }
