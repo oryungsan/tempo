@@ -166,10 +166,12 @@ pub fn show(ctx: &egui::Context, core: &Arc<Core>, ev: &Ev, st: &mut EvCardState
 }
 
 fn draw(ui: &mut egui::Ui, ctx: &egui::Context, core: &Arc<Core>, ev: &Ev, st: &mut EvCardState, k: f32, pc: &Pal, title: &str) -> bool {
-    let card = Rect::from_min_size(ui.max_rect().min, egui::vec2(W * k, H * k)).shrink(1.0);
+    let outer = Rect::from_min_size(ui.max_rect().min, egui::vec2(W * k, H * k));
+    let card = outer.shrink(1.0);
     let p = ui.painter().clone();
-    p.rect_filled(card, cr(16.0 * k), pc.card);
-    p.rect_stroke(card, cr(16.0 * k), Stroke::new(1.0_f32, pc.border), egui::StrokeKind::Inside);
+    // 바탕은 잘린 창 영역을 빈틈없이, 테두리는 경계 안쪽 (모서리가 계단처럼 거칠지 않게)
+    p.rect_filled(outer, cr(16.0 * k - 1.0), pc.card);
+    p.rect_stroke(outer.shrink(1.5 * k.max(1.0)), cr(16.0 * k - 2.0), Stroke::new(1.0_f32, pc.border), egui::StrokeKind::Inside);
     let key = ev.key();
     let bg = ui.interact(card, ui.id().with(("evcard", key)), Sense::click());
     super::drag::on_press(ctx, &bg, title, &st.dragged);

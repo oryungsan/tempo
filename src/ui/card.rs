@@ -364,18 +364,21 @@ fn draw(ui: &mut egui::Ui, ctx: &egui::Context, core: &Arc<Core>, def: &TimerDef
     let expanded = st.expanded && multi && size.1 > h0;
     let p = ui.painter().clone();
     // 바탕
+    // 창은 둥근 영역으로 잘림(투명 창이 안 되는 그래픽 대비) → 바탕은 그 경계를 넘치게 칠하고(잘린 가장자리가 같은 색),
+    // 테두리 선은 경계보다 안쪽에 (선의 부드러운 가장자리가 계단 모양으로 잘리지 않게)
+    let outer = Rect::from_min_size(full.min, egui::vec2(size.0 * k, size.1 * k));
     let list_area = if style == Style::Ring {
-        p.circle_filled(face.center(), face.width() / 2.0, pc.card);
-        p.circle_stroke(face.center(), face.width() / 2.0 - 0.5, Stroke::new(1.0_f32, pc.border));
+        p.circle_filled(face.center(), face.width() / 2.0 + 1.5, pc.card);
+        p.circle_stroke(face.center(), face.width() / 2.0 - 1.5 * k.max(1.0), Stroke::new(1.0_f32, pc.border));
         let panel = Rect::from_min_max(Pos2::new(card.left(), face.bottom() + LIST_GAP * k), card.max);
         if expanded {
-            p.rect_filled(panel, cr(16.0 * k), pc.card);
-            p.rect_stroke(panel, cr(16.0 * k), Stroke::new(1.0_f32, pc.border), egui::StrokeKind::Inside);
+            p.rect_filled(panel.expand(1.0), cr(16.0 * k - 1.0), pc.card);
+            p.rect_stroke(panel.shrink(1.5 * k.max(1.0)), cr(16.0 * k - 2.0), Stroke::new(1.0_f32, pc.border), egui::StrokeKind::Inside);
         }
         panel
     } else {
-        p.rect_filled(card, cr(16.0 * k), pc.card);
-        p.rect_stroke(card, cr(16.0 * k), Stroke::new(1.0_f32, pc.border), egui::StrokeKind::Inside);
+        p.rect_filled(outer, cr(16.0 * k - 1.0), pc.card);
+        p.rect_stroke(outer.shrink(1.5 * k.max(1.0)), cr(16.0 * k - 2.0), Stroke::new(1.0_f32, pc.border), egui::StrokeKind::Inside);
         if expanded {
             let y = face.bottom() + 2.0 * k;
             p.line_segment([Pos2::new(card.left() + 18.0 * k, y), Pos2::new(card.right() - 18.0 * k, y)], Stroke::new(1.0_f32, pc.border));
@@ -660,15 +663,15 @@ fn paint_classic(ui: &mut egui::Ui, ctx: &egui::Context, core: &Arc<Core>, def: 
         rr.on_hover_text("처음으로");
     }
 
-    // 단계 이름 / 상태
-    let name = match v.phase {
+    // 단계 이름 / 상태 (베드 = 환자 · 프로그램)
+    let name = if let Some(l) = super::styles::bed_label(def, v) { l } else { match v.phase {
         Phase::Idle if multi => format!("{}단계 · {}", v.n, human_dur(def.total_secs())),
         Phase::Idle => format!("{} 타이머", human_dur(def.total_secs())),
         Phase::Done => "끝났습니다".to_string(),
         _ if multi => v.step_name.clone(),
         _ => "남은 시간".to_string(),
-    };
-    let name_color = if v.phase.active() && multi { pc.text } else { pc.muted };
+    } };
+    let name_color = if v.phase.active() && (multi || def.bed.is_some()) { pc.text } else { pc.muted };
     let ng = truncated(ctx, &name, bf(15.5), name_color, right - left);
     p.galley(Pos2::new(left, top + 54.0 * k), ng, name_color);
 

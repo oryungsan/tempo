@@ -371,6 +371,18 @@ pub fn local_run(id: Id, snap: &crate::engine::Snap) {
     send_all(&items_msg(&[(format!("r:{id}"), now, v)], false), None);
 }
 
+/// 마지막 실행 변경 시각 (업데이트 넘기기용)
+pub fn run_rev(id: Id) -> i64 {
+    with_runs(|r| r.get(&id).map(|m| m.rev).unwrap_or(0))
+}
+
+/// 업데이트 뒤 이어받은 실행 상태의 출처
+pub fn set_run_meta(id: Id, rev: i64, remote: bool) {
+    with_runs(|r| {
+        r.insert(id, RunMeta { rev, remote });
+    });
+}
+
 /// 이 타이머를 마지막으로 움직인 게 다른 PC 인가 (소리 끌지 판단)
 pub fn remote_run(id: Id) -> bool {
     with_runs(|r| r.get(&id).map(|m| m.remote).unwrap_or(false))

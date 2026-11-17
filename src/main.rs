@@ -87,6 +87,8 @@ fn main() {
         if w > 0 && h > 0 { (x as f32, y as f32, (x + w) as f32, (y + h) as f32) } else { wa }
     };
     let core = Arc::new(core::Core::new(data, wa, vs));
+    // 업데이트 직전 진행 상태 이어받기 (있을 때만)
+    core.restore_runs_after_update();
     store::log(format!("started v{} (pid {})", env!("CARGO_PKG_VERSION"), std::process::id()));
     if let Some(n) = note {
         store::log(n);

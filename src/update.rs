@@ -191,9 +191,12 @@ fn check_inner(core: &Core) -> Result<(), String> {
     Ok(())
 }
 
-/// 지금 바꿔도 되나 — 모든 타이머 대기, 울리는 알림 없음, 편집 중 아님, 스톱워치 안 돎
+/// 지금 바꿔도 되나 — 울리는 알림 없음, 편집 중 아님, 스톱워치 안 돎, 디데이 다시 알림 없음.
+/// 타이머가 돌고 있어도 됨 (진행 상태를 저장해 새 버전이 이어받음)
 fn idle(core: &Core) -> bool {
-    core.views().iter().all(|v| v.phase == Phase::Idle) && core.rings().is_empty() && !core.ui_hold.load(Ordering::Relaxed) && !core.has_dday_snooze()
+    // 끝나기 1초 전 같은 경계는 피함 (단계가 넘어가는 순간 교체 X)
+    let edge = core.views().iter().any(|v| v.phase == Phase::Running && v.step_rem.as_secs_f32() < 1.5);
+    !edge && core.rings().is_empty() && !core.ui_hold.load(Ordering::Relaxed) && !core.has_dday_snooze()
 }
 
 fn try_apply(core: &Arc<Core>, tag: &str) -> bool {
@@ -230,6 +233,8 @@ fn apply(core: &Arc<Core>, tag: &str) -> Result<(), String> {
         let _ = std::fs::rename(&old, &exe);
         return Err(format!("새 exe 놓기 실패: {e}"));
     }
+    // 진행 중인 타이머 넘기기 (새 버전 · 되돌린 옛 버전 모두 시작할 때 읽음)
+    core.save_runs_for_update();
     let me = std::process::id().to_string();
     let mut args: Vec<String> = vec!["--after-update".into(), me];
     if !core.main_visible.load(Ordering::Relaxed) {

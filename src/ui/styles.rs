@@ -85,7 +85,27 @@ pub fn disp(def: &TimerDef, v: &TimerView, p: &Pal) -> Disp {
     } else {
         String::new()
     };
+    let (status, status_col) = match bed_label(def, v) {
+        Some(l) => (l, if v.phase == Phase::Done { p.green } else if v.phase == Phase::Paused { p.amber } else { color }),
+        None => (status, status_col),
+    };
     Disp { text, dcol, rem_frac, done_total, status, status_col, sub, color }
+}
+
+/// 베드 카드 문구 — 「환자 · 프로그램(또는 지금 단계)」, 끝 = 「끝 · 환자」
+pub fn bed_label(def: &TimerDef, v: &TimerView) -> Option<String> {
+    let b = def.bed.as_ref()?;
+    let who = b.patient.trim();
+    let what = if def.steps.len() > 1 { format!("{} {}/{}", v.step_name, v.idx + 1, v.n) } else if !b.program.is_empty() { b.program.clone() } else { v.step_name.clone() };
+    let join = |a: &str, c: &str| if a.is_empty() { c.to_string() } else if c.is_empty() { a.to_string() } else { format!("{a} · {c}") };
+    Some(match v.phase {
+        Phase::Running => join(who, &what),
+        Phase::Paused if v.waiting => join(who, &format!("대기 · {}", v.step_name)),
+        Phase::Paused => join(who, &format!("일시정지 · {what}")),
+        Phase::Done => join("끝", who),
+        Phase::Idle if !who.is_empty() => join("치료 전", who),
+        Phase::Idle => return None,
+    })
 }
 
 /// 원형 고리 — 위(12시)에서 시계 방향으로 `frac` 만큼

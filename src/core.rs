@@ -218,6 +218,52 @@ impl Core {
         self.rt.lock().unwrap().get(&id).map(|e| e.snapshot(Instant::now(), crate::sync::now_ms()))
     }
 
+    /// 업데이트 직전: 모든 타이머 진행 상태 저장 (새 버전이 이어받음)
+    pub fn save_runs_for_update(&self) -> bool {
+        let now_ms = crate::sync::now_ms();
+        let now = Instant::now();
+        let runs: std::collections::BTreeMap<String, serde_json::Value> = self
+            .rt
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, e)| e.phase != Phase::Idle)
+            .map(|(id, e)| (id.to_string(), serde_json::json!({ "snap": e.snapshot(now, now_ms), "remote": crate::sync::remote_run(*id), "rev": crate::sync::run_rev(*id) })))
+            .collect();
+        let j = serde_json::json!({ "saved_ms": now_ms, "runs": runs });
+        let ok = std::fs::write(store::dir().join("update-runs.json"), j.to_string()).is_ok();
+        log(format!("update: saved {} running timer(s) for handover", runs.len()));
+        ok
+    }
+
+    /// 시작할 때: 업데이트(또는 되돌리기) 직전 진행 상태가 있으면 이어받음 (2분 안에 저장된 것만)
+    pub fn restore_runs_after_update(&self) {
+        let path = store::dir().join("update-runs.json");
+        let Ok(t) = std::fs::read_to_string(&path) else { return };
+        let _ = std::fs::remove_file(&path);
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else { return };
+        let now_ms = crate::sync::now_ms();
+        if now_ms - v["saved_ms"].as_i64().unwrap_or(0) > 120_000 {
+            log("update: handover file too old — ignored");
+            return;
+        }
+        let now = Instant::now();
+        let mut n = 0;
+        if let Some(map) = v["runs"].as_object() {
+            let mut rt = self.rt.lock().unwrap();
+            for (k, x) in map {
+                let (Ok(id), Ok(sn)) = (k.parse::<Id>(), serde_json::from_value::<crate::engine::Snap>(x["snap"].clone())) else { continue };
+                if let Some(e) = rt.get_mut(&id) {
+                    e.restore(&sn, now, now_ms);
+                    crate::sync::set_run_meta(id, x["rev"].as_i64().unwrap_or(0), x["remote"].as_bool().unwrap_or(false));
+                    n += 1;
+                }
+            }
+        }
+        log(format!("update: restored {n} running timer(s)"));
+        self.repaint();
+    }
+
     /// 다른 PC 에서 온 변경 — 다시 보내지 않음
     pub fn apply_remote(&self, items: &[(String, Option<serde_json::Value>)], runs: &[(Id, crate::engine::Snap)], now_ms: i64) -> Vec<String> {
         let hk_before = self.hotkey_sig();
@@ -1267,8 +1313,36 @@ mod rem_tests {
 mod bed_tests {
     use super::*;
 
+    // TEMPO_DIR(프로세스 전체 환경 변수)를 쓰는 시험끼리 겹치지 않게
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn update_handover_keeps_running_timers() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("tempo-handover-{}", std::process::id()));
+        std::env::set_var("TEMPO_DIR", &dir);
+        let data = Data { timers: vec![TimerDef::simple("라면", 180, "#5B8DEF")], ..Data::seed() };
+        let id = data.timers[0].id;
+        let a = Core::new(data.clone(), (0.0, 0.0, 1920.0, 1080.0), (0.0, 0.0, 1920.0, 1080.0));
+        a.cmd(id, Cmd::Start, "t");
+        std::thread::sleep(Duration::from_millis(1200));
+        let before = a.view(id).unwrap().total_rem;
+        assert!(a.save_runs_for_update());
+        // 새 버전 = 같은 데이터로 새로 켜짐 → 이어받음
+        let b = Core::new(data, (0.0, 0.0, 1920.0, 1080.0), (0.0, 0.0, 1920.0, 1080.0));
+        assert_eq!(b.view(id).unwrap().phase, Phase::Idle);
+        b.restore_runs_after_update();
+        let v = b.view(id).unwrap();
+        assert_eq!(v.phase, Phase::Running);
+        assert!((v.total_rem.as_secs_f32() - before.as_secs_f32()).abs() < 0.5, "{:?} vs {:?}", v.total_rem, before);
+        // 파일은 한 번만
+        assert!(!dir.join("update-runs.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn emr_patient_and_vacate_rules() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // 시험 데이터 폴더 (실제 %APPDATA%\Tempo 를 건드리지 않게)
         let dir = std::env::temp_dir().join(format!("tempo-bedtest-{}", std::process::id()));
         std::env::set_var("TEMPO_DIR", &dir);
