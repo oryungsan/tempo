@@ -15,6 +15,7 @@ mod store;
 mod todo;
 mod tray;
 mod ui;
+mod update;
 mod world;
 
 use eframe::egui;
@@ -55,6 +56,15 @@ fn work_area() -> (f32, f32, f32, f32) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // 업데이트 감시 (옛 exe 로 실행됨) — 창 없이 새 버전 확인 · 실패하면 되돌림
+    if let Some(i) = args.iter().position(|a| a == "--update-watch") {
+        update::watch(&args[i + 1..]);
+        return;
+    }
+    // 업데이트로 새로 켜짐 — 옛 프로세스가 끝나길 기다림 (단일 실행 잠금 · API 포트)
+    if let Some(pid) = args.iter().position(|a| a == "--after-update").and_then(|i| args.get(i + 1)).and_then(|s| s.parse::<u32>().ok()) {
+        update::wait_pid(pid, 15_000);
+    }
     let (data, note) = store::load();
     if already_running() {
         ask_existing_to_show(data.settings.api_port);
@@ -79,6 +89,7 @@ fn main() {
     hotkey::spawn(core.clone());
     api::spawn(core.clone());
     todo::spawn(core.clone());
+    update::spawn(core.clone());
     {
         let core = core.clone();
         std::thread::Builder::new()

@@ -229,6 +229,15 @@ fn sidebar(ctx: &egui::Context, core: &Arc<Core>, st: &mut MainState, p: &Pal, v
                 ui.label(RichText::new(format!("{} {wd}요일", now.format("%m월 %d일"))).color(p.faint).size(12.0));
                 ui.label(RichText::new(now.format("%H:%M").to_string()).font(digits(26.0)).color(p.muted));
                 ui.add_space(6.0);
+                let ready = core.update_state.lock().unwrap().ready.clone();
+                if let Some(v) = ready {
+                    if ui.available_height() > 40.0 {
+                        let r = ui.add(egui::Label::new(RichText::new(format!("⬆ 새 버전 {v}")).color(p.accent).size(12.5)).sense(Sense::click()));
+                        if r.on_hover_text("설정 → 업데이트").clicked() {
+                            st.page = Page::Settings;
+                        }
+                    }
+                }
                 let mut rows: Vec<(Color32, String, String, Color32)> = Vec::new();
                 for v in views.iter().filter(|v| v.phase.active()).take(3) {
                     let rem = if v.n > 1 { v.step_rem } else { v.total_rem };
@@ -814,6 +823,7 @@ fn settings_page(ui: &mut Ui, core: &Arc<Core>, st: &mut MainState, p: &Pal) {
                 .size(12.0),
             );
         });
+        section(ui, p, "업데이트", |ui| update_section(ui, core, p, &mut s.update_mode));
         section(ui, p, "데이터", |ui| {
             ui.horizontal(|ui| {
                 if ghost(ui, p, "데이터 폴더 열기").clicked() {
@@ -976,6 +986,43 @@ fn style_grid(ui: &mut Ui, p: &Pal, style: &mut Style) {
             }
         }
     });
+}
+
+/// 설정 — 자동 업데이트
+fn update_section(ui: &mut Ui, core: &Arc<Core>, p: &Pal, mode: &mut crate::model::UpdateMode) {
+    use crate::model::UpdateMode;
+    let us = core.update_state.lock().unwrap().clone();
+    row(ui, p, "새 버전 자동 업데이트", "GitHub 릴리스를 켤 때 · 6시간마다 확인. 자동 = 타이머가 모두 쉬고 알림이 없을 때 바꾸고 다시 켭니다", |ui| {
+        segmented(ui, p, mode, &[(UpdateMode::Auto, "자동"), (UpdateMode::Notify, "알림만"), (UpdateMode::Off, "끔")]);
+    });
+    ui.separator();
+    let (txt, col) = if let Some(e) = &us.error {
+        (format!("오류: {e}"), p.red)
+    } else if let Some(v) = &us.ready {
+        if us.waiting {
+            (format!("새 버전 {v} 받음 — 타이머·알림이 끝나면 바꿉니다"), p.accent)
+        } else if *mode == UpdateMode::Auto {
+            (format!("새 버전 {v} 받음 — 곧 바꿉니다"), p.accent)
+        } else {
+            (format!("새 버전 {v} 받음 — 「지금 업데이트」를 누르세요"), p.accent)
+        }
+    } else if us.busy {
+        ("확인 중…".to_string(), p.muted)
+    } else {
+        match (&us.latest, us.last_check) {
+            (Some(l), Some(t)) => (format!("최신 버전 {l} · 마지막 확인 {}", t.format("%m-%d %H:%M")), p.muted),
+            _ => ("아직 확인 안 함".to_string(), p.muted),
+        }
+    };
+    row(ui, p, &format!("지금 버전 {}", env!("CARGO_PKG_VERSION")), &txt, |ui| {
+        if us.ready.is_some() && primary(ui, p, "지금 업데이트").clicked() {
+            crate::update::apply_now();
+        }
+        if ghost(ui, p, if us.busy { "확인 중…" } else { "지금 확인" }).clicked() {
+            crate::update::nudge();
+        }
+    });
+    let _ = col;
 }
 
 /// 설정 — Microsoft To Do 연결

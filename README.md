@@ -53,6 +53,16 @@
 ### 소리
 내장 합성음 15종 + 내 소리 파일(wav · mp3 · flac · ogg), 미리 듣기, 전체 볼륨
 
+## 자동 업데이트
+
+켤 때와 6시간마다 이 저장소의 최신 릴리스를 확인합니다 (설정 → 업데이트: **자동** / 알림만 / 끔).
+
+- 새 버전이 있으면 `tempo.exe` 를 내려받아 릴리스 설명의 **SHA-256** 과 맞는지 검사합니다
+- **타이머가 모두 쉬고 울리는 알림이 없을 때만** 바꿉니다 (편집 창이 열려 있거나 스톱워치가 돌면 기다림)
+- 바꾼 뒤 1~2초 만에 다시 켜지고, 이전 버전은 `tempo.old.exe` 로 남습니다
+- 새 버전이 45초 안에 정상 응답하지 않으면 **이전 버전으로 자동으로 되돌리고**, 그 버전은 다시 받지 않습니다
+- 실행 파일이 있는 폴더에 쓸 권한이 있어야 합니다 (`C:\Program Files` 처럼 관리자 전용 폴더에 두면 「알림만」처럼 동작)
+
 ## 데이터 · 제거
 
 - 설정과 데이터: `%APPDATA%\Tempo\` (`data.json`, 기록 `tempo.log`)
@@ -70,6 +80,7 @@
 | `/status` · `/start` … | 설정의 「연동 타이머」 하나를 짧은 주소로 |
 | `/api/show` | 메인 창 열기 |
 | `/api/countdowns` · `/api/ddays` · `/api/world` | 카운트다운 남은 시간 · 디데이 · 월드타임 시각 |
+| `/api/update` (`?do=check` · `?do=apply`) | 자동 업데이트 상태 · 지금 확인 · 지금 업데이트 |
 
 ## 직접 빌드
 
@@ -80,6 +91,7 @@ cargo build --release
 ```
 
 - GNU 툴체인은 `dlltool` 이 PATH 에 있어야 합니다 (`build.sh` 참고).
+- **릴리스**: `Tempo-x.y.z-windows-x64.zip` 과 함께 **`tempo.exe` 를 따로 첨부**하고, 설명에 `` SHA-256 (exe): `<64자리>` `` 줄을 넣어야 자동 업데이트가 받습니다
 - 실행 파일 아이콘 · 버전 정보는 `assets/tempo-res.o` 를 링크합니다. 바꿀 때만 `python tools/make_res.py <버전> <windres 경로>` 로 다시 만드세요.
 
 egui · eframe · rodio · tiny_http · tray-icon · rfd · ureq 를 사용합니다.

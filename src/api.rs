@@ -6,6 +6,7 @@
 //!     GET /api/timer?id=<id>&do=<cmd>       특정 타이머 (id 대신 name=<이름> 가능)
 //!     GET /api/show                         메인 창 열기
 //!     GET /api/world · /api/countdowns · /api/ddays   월드타임 · 카운트다운 · 디데이
+//!     GET /api/update[?do=check|apply]       자동 업데이트 상태 · 지금 확인 · 지금 업데이트
 use crate::core::Core;
 use crate::engine::Cmd;
 use crate::model::Id;
@@ -206,6 +207,17 @@ fn run(core: Arc<Core>) {
                         })
                         .collect(),
                 ))
+            }
+            "/api/update" => {
+                match get("do").as_deref() {
+                    Some("check") => {
+                        crate::update::nudge();
+                        std::thread::sleep(Duration::from_secs(8));
+                    }
+                    Some("apply") => crate::update::apply_now(),
+                    _ => {}
+                }
+                Some(crate::update::status_json(&core))
             }
             "/api/show" => {
                 core.open_main.store(true, Ordering::Relaxed);

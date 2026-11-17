@@ -94,6 +94,12 @@ pub struct Core {
     pub focus_request: Mutex<Option<Id>>,
     /// 카운트다운 · 디데이 카드에서 → 메인 창에서 편집 (true = 디데이)
     pub clock_request: Mutex<Option<(bool, Id)>>,
+    /// 자동 업데이트 상태 (설정 화면 표시용)
+    pub update_state: Mutex<crate::update::UpdateState>,
+    /// 화면 쪽이 바쁨 (편집 창 열림 · 스톱워치) — 업데이트 미룸
+    pub ui_hold: AtomicBool,
+    /// 메인 창이 열려 있음 — 업데이트 후 다시 열기
+    pub main_visible: AtomicBool,
     /// 디데이 「다시 알림」 — id → (울릴 시각, 알림 문구)
     dday_snooze: Mutex<HashMap<Id, (chrono::NaiveDateTime, String)>>,
     stats: Mutex<Stats>,
@@ -129,6 +135,9 @@ impl Core {
             focus_request: Mutex::new(None),
             clock_request: Mutex::new(None),
             dday_snooze: Mutex::new(HashMap::new()),
+            update_state: Mutex::new(Default::default()),
+            ui_hold: AtomicBool::new(false),
+            main_visible: AtomicBool::new(false),
             rem_fired: Mutex::new(HashMap::new()),
             hidden_cards: Mutex::new(HashSet::new()),
             todo: Mutex::new(Default::default()),
@@ -691,6 +700,10 @@ impl Core {
         });
     }
 
+    pub fn has_dday_snooze(&self) -> bool {
+        !self.dday_snooze.lock().unwrap().is_empty()
+    }
+
     /// 디데이 알림 「N분 뒤 다시」
     pub fn snooze_dday(&self, id: Id, mins: i64) {
         let sub = self.rings().into_iter().find(|r| r.0 == RingKind::Dday(id)).map(|r| r.2).unwrap_or_default();
@@ -821,7 +834,7 @@ impl Core {
 
     pub fn status_json(&self, id: Option<Id>) -> serde_json::Value {
         let Some(v) = id.and_then(|i| self.view(i)) else {
-            return serde_json::json!({ "error": "no timer" });
+            return serde_json::json!({ "error": "no timer", "version": env!("CARGO_PKG_VERSION") });
         };
         let hk = self.data().timers.iter().find(|t| t.id == v.id).map(|t| t.hotkey_toggle.clone()).unwrap_or_default();
         serde_json::json!({

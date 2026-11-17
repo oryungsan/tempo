@@ -21,6 +21,11 @@ pub struct ClockState {
 }
 
 impl ClockState {
+    /// 편집 창이 열려 있나
+    pub fn editing(&self) -> bool {
+        self.cd_edit.is_some() || self.dd_edit.is_some() || self.picker.is_some() || self.rename.is_some()
+    }
+
     pub fn apply_pick(&mut self, t: PickTarget, sound: String) {
         if t != PickTarget::Alarm {
             return;

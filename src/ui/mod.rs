@@ -254,6 +254,11 @@ impl eframe::App for App {
 
         ring::show(ctx, &core, &p);
 
+        // 업데이트 판단용: 편집 창 · 스톱워치 · 메인 창
+        let m = &self.main;
+        let hold = m.sw.running() || m.timer_edit.is_some() || m.alarm_edit.is_some() || m.rem.edit.is_some() || m.clk.editing();
+        core.ui_hold.store(hold, std::sync::atomic::Ordering::Relaxed);
+        core.main_visible.store(self.main_open, std::sync::atomic::Ordering::Relaxed);
         // 초 단위로 바뀌는 화면 (카운트다운 · 월드타임) · 사이드바 고정 카운트다운
         let live_page = self.main_open && matches!(self.main.page, main_win::Page::Countdown | main_win::Page::World | main_win::Page::Dday);
         let pinned_cd = self.main_open && core.data().countdowns.iter().any(|c| c.pinned && !c.fired);

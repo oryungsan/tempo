@@ -283,6 +283,22 @@ pub struct Settings {
     /// 떠 있는 카드 항상 위 (기본 켬)
     #[serde(default = "yes")]
     pub cards_on_top: bool,
+    /// 새 버전 자동 업데이트
+    #[serde(default = "upd_auto")]
+    pub update_mode: UpdateMode,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum UpdateMode {
+    /// 받아서 타이머가 모두 쉴 때 바로 교체
+    Auto,
+    /// 받아 두고 알려만 줌 (「지금 업데이트」)
+    Notify,
+    Off,
+}
+
+fn upd_auto() -> UpdateMode {
+    UpdateMode::Auto
 }
 
 fn classic() -> Style {
@@ -305,6 +321,7 @@ impl Default for Settings {
             todo: TodoSettings::default(),
             main_on_top: false,
             cards_on_top: true,
+            update_mode: UpdateMode::Auto,
         }
     }
 }
