@@ -469,6 +469,59 @@ pub struct Dday {
     pub card: bool,
     #[serde(default)]
     pub card_pos: Option<[f32; 2]>,
+    /// 알림 목록 — 며칠 전 · 시각 · 켬/끔 (비어 있으면 옛 alert_time + remind 로 만듦)
+    #[serde(default)]
+    pub alerts: Vec<AlertRule>,
+    /// 그날부터: 몇 일째마다 알릴지
+    #[serde(default = "every100")]
+    pub day_step: DayStep,
+    /// 그날부터: 주년(1주년 · 2주년 …)도 알림
+    #[serde(default = "yes")]
+    pub yearly_ms: bool,
+    /// true = 소리 한 번만, false = 끌 때까지 계속 (최대 10분)
+    #[serde(default)]
+    pub ring_once: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AlertRule {
+    /// 며칠 전 (0 = 당일)
+    pub before: u32,
+    /// "HH:MM"
+    pub time: String,
+    #[serde(default = "yes")]
+    pub on: bool,
+}
+
+impl AlertRule {
+    pub fn new(before: u32, time: &str) -> Self {
+        AlertRule { before, time: time.into(), on: true }
+    }
+    pub fn naive(&self) -> chrono::NaiveTime {
+        chrono::NaiveTime::parse_from_str(&self.time, "%H:%M").unwrap_or_else(|_| chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap())
+    }
+}
+
+/// 그날부터: 기념일 간격
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DayStep {
+    Every100,
+    Every1000,
+    Off,
+}
+
+impl DayStep {
+    pub fn step(self) -> Option<i64> {
+        match self {
+            DayStep::Every100 => Some(100),
+            DayStep::Every1000 => Some(1000),
+            DayStep::Off => None,
+        }
+    }
+}
+
+fn every100() -> DayStep {
+    DayStep::Every100
 }
 
 fn nine() -> String {
@@ -491,11 +544,20 @@ impl Dday {
             fired: vec![],
             card: false,
             card_pos: None,
+            alerts: vec![AlertRule::new(0, "09:00")],
+            day_step: DayStep::Every100,
+            yearly_ms: true,
+            ring_once: false,
         }
     }
-    /// 알림 시각 (잘못된 값이면 09:00)
-    pub fn alert_naive(&self) -> chrono::NaiveTime {
-        chrono::NaiveTime::parse_from_str(&self.alert_time, "%H:%M").unwrap_or_else(|_| chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap())
+    /// 실제 알림 목록 — 새 형식(alerts)이 비어 있으면 옛 형식(alert_time + remind)에서
+    pub fn rules(&self) -> Vec<AlertRule> {
+        if !self.alerts.is_empty() {
+            return self.alerts.clone();
+        }
+        let mut v = vec![AlertRule::new(0, &self.alert_time)];
+        v.extend(self.remind.iter().filter(|n| **n > 0).map(|n| AlertRule::new(*n, &self.alert_time)));
+        v
     }
     pub fn date_nd(&self) -> Option<chrono::NaiveDate> {
         chrono::NaiveDate::parse_from_str(&self.date, "%Y-%m-%d").ok()

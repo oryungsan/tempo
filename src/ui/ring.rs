@@ -100,7 +100,18 @@ pub fn show(ctx: &egui::Context, core: &Arc<Core>, p: &Pal) {
                             core.snooze_reminder(id, 10);
                         }
                     }
-                    RingKind::Countdown(_) | RingKind::Dday(_) => {
+                    RingKind::Dday(id) => {
+                        if primary(ui, &p, "  닫기  ").clicked() {
+                            core.dismiss(kind);
+                        }
+                        if ghost(ui, &p, "1시간 뒤").clicked() {
+                            core.snooze_dday(id, 60);
+                        }
+                        if ghost(ui, &p, "10분 뒤").clicked() {
+                            core.snooze_dday(id, 10);
+                        }
+                    }
+                    RingKind::Countdown(_) => {
                         if primary(ui, &p, "  닫기  ").clicked() {
                             core.dismiss(kind);
                         }

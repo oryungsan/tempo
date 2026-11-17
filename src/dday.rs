@@ -29,32 +29,6 @@ fn on_year(base: NaiveDate, year: i32) -> NaiveDate {
     NaiveDate::from_ymd_opt(year, base.month(), base.day()).unwrap_or_else(|| NaiveDate::from_ymd_opt(year, 2, 28).unwrap())
 }
 
-/// 그날부터 셀 때 다음 기념일 — 100일 단위 · 해마다
-pub fn next_milestone(start: NaiveDate, today: NaiveDate) -> Option<(String, NaiveDate, i64)> {
-    let mut best: Option<(String, NaiveDate)> = None;
-    let mut consider = |name: String, d: NaiveDate| {
-        if d >= today && best.as_ref().map(|b| d < b.1).unwrap_or(true) {
-            best = Some((name, d));
-        }
-    };
-    // 첫날 = 1일째 → N일째 = 시작 + (N-1)일
-    let n_now = (today - start).num_days() + 1;
-    let k = (n_now.max(1) + 99) / 100 * 100;
-    for n in [k, k + 100] {
-        consider(format!("{n}일"), start + chrono::Duration::days(n - 1));
-    }
-    let years = (today.year() - start.year()).max(1);
-    for y in [years, years + 1] {
-        if let Some(d) = start.checked_add_months(Months::new(12 * y as u32)) {
-            consider(format!("{y}주년"), d);
-        }
-    }
-    best.map(|(n, d)| {
-        let left = (d - today).num_days();
-        (n, d, left)
-    })
-}
-
 pub fn info(d: &Dday, today: NaiveDate) -> Option<DdayInfo> {
     let date = d.date_nd()?;
     Some(match d.mode {
@@ -73,7 +47,8 @@ pub fn info(d: &Dday, today: NaiveDate) -> Option<DdayInfo> {
                 DdayInfo { big: d_label(days), small: "시작 전".into(), target: date, days, next: None }
             } else {
                 let n = -days + 1;
-                DdayInfo { big: format!("{n}일째"), small: d_label(days), target: date, days, next: next_milestone(date, today) }
+                let next = events(d, today, today + chrono::Duration::days(1100)).into_iter().next().map(|(n, dt)| (n, dt, (dt - today).num_days()));
+                DdayInfo { big: format!("{n}일째"), small: d_label(days), target: date, days, next }
             }
         }
         DdayMode::Yearly => {
@@ -110,17 +85,20 @@ pub fn events(d: &Dday, from: NaiveDate, to: NaiveDate) -> Vec<(String, NaiveDat
         }
         DdayMode::Since => {
             // N일째 = 시작 + (N-1)일
-            let first = ((from - date).num_days() + 1).max(1);
-            let mut n = (first + 99) / 100 * 100;
-            loop {
-                let e = date + chrono::Duration::days(n - 1);
-                if e > to {
-                    break;
+            if let Some(step) = d.day_step.step() {
+                let first = ((from - date).num_days() + 1).max(1);
+                let mut n = (first + step - 1) / step * step;
+                loop {
+                    let e = date + chrono::Duration::days(n - 1);
+                    if e > to {
+                        break;
+                    }
+                    v.push((format!("{n}일"), e));
+                    n += step;
                 }
-                v.push((format!("{n}일"), e));
-                n += 100;
             }
-            for y in (from.year() - date.year()).max(1)..=(to.year() - date.year()).max(1) {
+            let years = if d.yearly_ms { (from.year() - date.year()).max(1)..=(to.year() - date.year()).max(1) } else { 1..=0 };
+            for y in years {
                 if let Some(e) = date.checked_add_months(Months::new(12 * y as u32)) {
                     if e >= from && e <= to {
                         v.push((format!("{y}주년"), e));
@@ -150,21 +128,53 @@ pub fn due_alerts(d: &Dday, now: NaiveDateTime) -> Vec<Alert> {
     if !d.notify {
         return vec![];
     }
-    let t = d.alert_naive();
-    let mut offs: Vec<u32> = vec![0];
-    offs.extend(d.remind.iter().copied().filter(|n| *n > 0));
-    let max = *offs.iter().max().unwrap_or(&0) as i64;
+    let rules: Vec<_> = d.rules().into_iter().filter(|r| r.on).collect();
+    let max = rules.iter().map(|r| r.before).max().unwrap_or(0) as i64;
     let today = now.date();
     let mut out = Vec::new();
     for (label, e) in events(d, today - chrono::Duration::days(1), today + chrono::Duration::days(max + 1)) {
-        for &n in &offs {
-            let at = (e - chrono::Duration::days(n as i64)).and_time(t);
+        for r in &rules {
+            let at = (e - chrono::Duration::days(r.before as i64)).and_time(r.naive());
             if at <= now && now - at < chrono::Duration::hours(12) {
-                out.push(Alert { key: format!("{e}/{n}"), at, label: label.clone(), date: e, before: n });
+                out.push(Alert { key: format!("{e}/{}@{}", r.before, r.time), at, label: label.clone(), date: e, before: r.before });
             }
         }
     }
     out
+}
+
+/// 다음에 울릴 알림 (지금 이후 가장 가까운 것)
+pub fn next_alert(d: &Dday, now: NaiveDateTime) -> Option<Alert> {
+    if !d.notify {
+        return None;
+    }
+    let rules: Vec<_> = d.rules().into_iter().filter(|r| r.on).collect();
+    let max = rules.iter().map(|r| r.before).max()? as i64;
+    let today = now.date();
+    let mut best: Option<Alert> = None;
+    for (label, e) in events(d, today, today + chrono::Duration::days(max + 1100)) {
+        for r in &rules {
+            let at = (e - chrono::Duration::days(r.before as i64)).and_time(r.naive());
+            if at > now && best.as_ref().map(|b| at < b.at).unwrap_or(true) {
+                best = Some(Alert { key: format!("{e}/{}@{}", r.before, r.time), at, label: label.clone(), date: e, before: r.before });
+            }
+        }
+        // 날짜순이라 이미 찾았고 그날이 그보다 뒤면 그만
+        if best.as_ref().map(|b| e > b.at.date() + chrono::Duration::days(max)).unwrap_or(false) {
+            break;
+        }
+    }
+    best
+}
+
+/// 「오늘 09:00」 · 「내일 20:00」 · 「12월 3일 (목) 09:00」
+pub fn when_ko(at: NaiveDateTime, today: NaiveDate) -> String {
+    let t = at.format("%H:%M");
+    match (at.date() - today).num_days() {
+        0 => format!("오늘 {t}"),
+        1 => format!("내일 {t}"),
+        _ => format!("{} {t}", date_ko(at.date(), today)),
+    }
 }
 
 /// 하루 안으로 다가온 그날 — (이름, 그날 0시까지 남은 초). 화면에 초 단위로
@@ -278,12 +288,14 @@ mod tests {
     #[test]
     fn alerts_day_and_before() {
         let mut d = dd(nd(2026, 12, 10), DdayMode::Until);
+        // 옛 형식 데이터 (alerts 비어 있음 + remind) → rules() 로 변환되는지
+        d.alerts.clear();
         d.remind = vec![7, 1];
         let at = |y, m, dd_, h, mi| nd(y, m, dd_).and_hms_opt(h, mi, 0).unwrap();
         // 7일 전 09:00 이 지나면 울림, 그 전엔 안 울림
         assert!(due_alerts(&d, at(2026, 12, 3, 8, 59)).is_empty());
         let a = due_alerts(&d, at(2026, 12, 3, 9, 0));
-        assert_eq!((a.len(), a[0].before, a[0].key.as_str()), (1, 7, "2026-12-10/7"));
+        assert_eq!((a.len(), a[0].before, a[0].key.as_str()), (1, 7, "2026-12-10/7@09:00"));
         // 그날 09:30 — 그날 알림만 (1일 전 것은 12시간 넘게 지남)
         let a = due_alerts(&d, at(2026, 12, 10, 9, 30));
         assert_eq!((a.len(), a[0].before, a[0].label.as_str()), (1, 0, "D-Day"));
@@ -301,8 +313,9 @@ mod tests {
         assert_eq!(due_alerts(&s, at(2027, 1, 1, 10))[0].label, "1주년");
         assert!(due_alerts(&s, at(2026, 4, 11, 10)).is_empty());
         let mut b = dd(nd(1990, 3, 5), DdayMode::Yearly);
+        b.alerts.clear();
         b.remind = vec![3];
-        assert_eq!(due_alerts(&b, at(2027, 3, 2, 10))[0].key, "2027-03-05/3");
+        assert_eq!(due_alerts(&b, at(2027, 3, 2, 10))[0].key, "2027-03-05/3@09:00");
         assert_eq!(due_alerts(&b, at(2027, 3, 5, 10))[0].label, "37번째");
     }
 
@@ -318,6 +331,40 @@ mod tests {
         let now = nd(2026, 4, 9).and_hms_opt(23, 0, 0).unwrap();
         let i = info(&s, now.date()).unwrap();
         assert_eq!(soon(&s, &i, now), Some(("100일까지".into(), 3600)));
+    }
+
+
+    #[test]
+    fn custom_rules_and_milestone_options() {
+        use crate::model::{AlertRule, DayStep};
+        let at = |y, m, dd_, h, mi| nd(y, m, dd_).and_hms_opt(h, mi, 0).unwrap();
+        let mut d = dd(nd(2026, 12, 10), DdayMode::Until);
+        d.alerts = vec![AlertRule::new(7, "20:00"), AlertRule::new(1, "21:30"), AlertRule::new(0, "08:00")];
+        // D-7 은 20:00 에, D-1 은 21:30 에, 당일은 08:00 에
+        assert!(due_alerts(&d, at(2026, 12, 3, 19, 59)).is_empty());
+        assert_eq!(due_alerts(&d, at(2026, 12, 3, 20, 0))[0].key, "2026-12-10/7@20:00");
+        assert_eq!(due_alerts(&d, at(2026, 12, 9, 21, 30))[0].before, 1);
+        // 당일 08:00 — 전날 21:30 알림도 12시간 안이라 둘 다 후보 (실제로는 이미 울려 fired 에 있음)
+        assert!(due_alerts(&d, at(2026, 12, 10, 8, 0)).iter().any(|a| a.before == 0));
+        // 꺼 둔 알림은 안 울림
+        d.alerts[1].on = false;
+        assert!(due_alerts(&d, at(2026, 12, 9, 21, 30)).is_empty());
+        // 다음 알림
+        let n = next_alert(&d, at(2026, 12, 1, 12, 0)).unwrap();
+        assert_eq!((n.before, n.at), (7, at(2026, 12, 3, 20, 0)));
+        assert_eq!(next_alert(&d, at(2026, 12, 4, 0, 0)).unwrap().at, at(2026, 12, 10, 8, 0));
+        assert_eq!(when_ko(at(2026, 12, 4, 20, 0), nd(2026, 12, 3)), "내일 20:00");
+        // 그날부터: 1000일마다만 · 주년 끔
+        let mut s = dd(nd(2024, 3, 2), DdayMode::Since);
+        s.day_step = DayStep::Every1000;
+        s.yearly_ms = false;
+        let ev = events(&s, nd(2026, 1, 1), nd(2027, 12, 31));
+        assert_eq!(ev, vec![("1000일".to_string(), nd(2026, 11, 26))]);
+        assert_eq!(info(&s, nd(2026, 11, 17)).unwrap().next.unwrap().0, "1000일");
+        s.day_step = DayStep::Off;
+        assert!(events(&s, nd(2026, 1, 1), nd(2027, 12, 31)).is_empty());
+        s.yearly_ms = true;
+        assert_eq!(events(&s, nd(2026, 1, 1), nd(2026, 12, 31)), vec![("2주년".to_string(), nd(2026, 3, 2))]);
     }
 
 }

@@ -84,6 +84,12 @@ impl App {
                 let d = chrono::Local::now().date_naive() + chrono::Duration::days(30);
                 main.clk.dd_edit = Some(clocks::DdayEdit::new(crate::model::Dday::new("", d, crate::model::DdayMode::Until, crate::model::PALETTE[5]), true));
             }
+            Some(x) if x.starts_with("dday:") => {
+                let id = core.data().ddays.iter().find(|d| d.title == x[5..]).map(|d| d.id);
+                if let Some(id) = id {
+                    main.open_clock(&core, true, id);
+                }
+            }
             Some("city") => {
                 main.page = main_win::Page::World;
                 main.clk.picker = Some(Default::default());

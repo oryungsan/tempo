@@ -94,6 +94,8 @@ pub struct Core {
     pub focus_request: Mutex<Option<Id>>,
     /// 카운트다운 · 디데이 카드에서 → 메인 창에서 편집 (true = 디데이)
     pub clock_request: Mutex<Option<(bool, Id)>>,
+    /// 디데이 「다시 알림」 — id → (울릴 시각, 알림 문구)
+    dday_snooze: Mutex<HashMap<Id, (chrono::NaiveDateTime, String)>>,
     stats: Mutex<Stats>,
     /// 닫은 카드 (그 타이머를 다시 시작하면 다시 보임)
     hidden_cards: Mutex<std::collections::HashSet<Id>>,
@@ -126,6 +128,7 @@ impl Core {
             edit_request: Mutex::new(None),
             focus_request: Mutex::new(None),
             clock_request: Mutex::new(None),
+            dday_snooze: Mutex::new(HashMap::new()),
             rem_fired: Mutex::new(HashMap::new()),
             hidden_cards: Mutex::new(HashSet::new()),
             todo: Mutex::new(Default::default()),
@@ -435,9 +438,14 @@ impl Core {
     }
 
     fn push_ring(&self, kind: RingKind, title: String, subtitle: String, sound: Option<String>) {
+        self.push_ring_ex(kind, title, subtitle, sound, true);
+    }
+
+    /// looping = 끌 때까지 계속 (최대 10분), false = 한 번만
+    fn push_ring_ex(&self, kind: RingKind, title: String, subtitle: String, sound: Option<String>, looping: bool) {
         let vol = self.data().settings.volume;
         let stop = match sound {
-            Some(s) => audio::play(&s, PlayOpts { volume: vol, repeat: 1, looping: true, max: Duration::from_secs(600) }),
+            Some(s) => audio::play(&s, PlayOpts { volume: vol, repeat: 1, looping, max: Duration::from_secs(if looping { 600 } else { 0 }) }),
             None => Arc::new(AtomicBool::new(true)),
         };
         let mut rings = self.rings.lock().unwrap();
@@ -683,13 +691,37 @@ impl Core {
         });
     }
 
+    /// 디데이 알림 「N분 뒤 다시」
+    pub fn snooze_dday(&self, id: Id, mins: i64) {
+        let sub = self.rings().into_iter().find(|r| r.0 == RingKind::Dday(id)).map(|r| r.2).unwrap_or_default();
+        self.dismiss(RingKind::Dday(id));
+        let at = Local::now().naive_local() + chrono::Duration::minutes(mins);
+        self.dday_snooze.lock().unwrap().insert(id, (at, sub));
+        log(format!("dday {id} snoozed {mins} min"));
+    }
+
     pub fn delete_dday(&self, id: Id) {
+        self.dday_snooze.lock().unwrap().remove(&id);
         self.dismiss(RingKind::Dday(id));
         self.update(|d| d.ddays.retain(|x| x.id != id));
     }
 
     fn tick_ddays(&self) {
         let now = Local::now().naive_local();
+        // 다시 알림
+        let snoozed: Vec<(Id, String)> = {
+            let mut sn = self.dday_snooze.lock().unwrap();
+            let due: Vec<(Id, String)> = sn.iter().filter(|(_, v)| v.0 <= now).map(|(k, v)| (*k, v.1.clone())).collect();
+            for (k, _) in &due {
+                sn.remove(k);
+            }
+            due
+        };
+        for (id, sub) in snoozed {
+            let Some(d) = self.data().ddays.iter().find(|x| x.id == id).cloned() else { continue };
+            log(format!("dday '{}' snooze ringing", d.title));
+            self.push_ring_ex(RingKind::Dday(id), d.title.clone(), sub, Some(d.sound.clone()), !d.ring_once);
+        }
         let mut fire: Vec<(crate::model::Dday, crate::dday::Alert)> = Vec::new();
         for d in self.data().ddays.iter().filter(|d| d.notify) {
             for a in crate::dday::due_alerts(d, now) {
@@ -729,7 +761,7 @@ impl Core {
                 (n, _) => format!("디데이 · {} D-{n} ({day})", a.label),
             };
             log(format!("dday '{}' alert {} ringing", d.title, a.key));
-            self.push_ring(RingKind::Dday(d.id), d.title.clone(), sub, Some(d.sound.clone()));
+            self.push_ring_ex(RingKind::Dday(d.id), d.title.clone(), sub, Some(d.sound.clone()), !d.ring_once);
         }
     }
 

@@ -767,9 +767,9 @@ fn dday_card(ui: &mut Ui, st: &mut ClockState, p: &Pal, d: &Dday, i: &dday::Dday
     pt.rect_filled(mr, cr(mr.height() / 2.0), p.input);
     pt.galley(mr.min + egui::vec2(6.0, 3.0), mode_g, p.muted);
     let mut title_right = mr.left();
-    if d.notify {
-        // 알림 켜짐 = 종 + 시각
-        let ag = ui.fonts(|f| f.layout_no_wrap(format!("⏰ {}", d.alert_time), FontId::proportional(11.0), p.faint));
+    if let Some(a) = dday::next_alert(d, now) {
+        // 다음 알림 시각
+        let ag = ui.fonts(|f| f.layout_no_wrap(format!("⏰ {}", short_when(a.at, today)), FontId::proportional(11.0), p.faint));
         let ax = mr.left() - ag.size().x - 8.0;
         pt.galley(Pos2::new(ax, mr.center().y - ag.size().y / 2.0), ag, p.faint);
         title_right = ax;
@@ -814,20 +814,147 @@ fn dday_card(ui: &mut Ui, st: &mut ClockState, p: &Pal, d: &Dday, i: &dday::Dday
     }
 }
 
+/// 카드용 짧은 시각 — 「오늘 09:00」 · 「12.3 20:00」
+fn short_when(at: NaiveDateTime, today: NaiveDate) -> String {
+    match (at.date() - today).num_days() {
+        0 => format!("오늘 {}", at.format("%H:%M")),
+        1 => format!("내일 {}", at.format("%H:%M")),
+        _ => format!("{}.{} {}", at.month(), at.day(), at.format("%H:%M")),
+    }
+}
+
 pub struct DdayEdit {
     pub d: Dday,
     is_new: bool,
     date: NaiveDate,
-    ah: u32,
-    am: u32,
+    /// 「직접」 추가할 며칠 전
+    add_before: u32,
     confirm_delete: bool,
 }
 
 impl DdayEdit {
     pub fn new(d: Dday, is_new: bool) -> Self {
         let date = d.date_nd().unwrap_or_else(|| Local::now().date_naive());
-        let t = d.alert_naive();
-        DdayEdit { ah: t.hour(), am: t.minute(), d, is_new, date, confirm_delete: false }
+        let mut d = d;
+        // 옛 형식(alert_time + remind) → 알림 목록
+        d.alerts = d.rules();
+        DdayEdit { d, is_new, date, add_before: 2, confirm_delete: false }
+    }
+
+    /// 알림 세부 설정 — 알림 목록(며칠 전 · 시각 · 켬/끔) · 기념일 간격 · 소리 · 울리는 방식
+    fn alerts_ui(&mut self, ui: &mut Ui, core: &Arc<Core>, p: &Pal, slot: &PickSlot, probe: &Dday) {
+        let now = Local::now().naive_local();
+        ui.horizontal(|ui| {
+            toggle(ui, p, &mut self.d.notify);
+            ui.label(RichText::new("알림").size(14.5));
+            if self.d.notify {
+                let mut pr = probe.clone();
+                pr.alerts = self.d.alerts.clone();
+                let txt = match dday::next_alert(&pr, now) {
+                    Some(a) => {
+                        let what = match (a.before, self.d.mode) {
+                            (0, _) => a.label.clone(),
+                            (n, DdayMode::Until) => format!("D-{n}"),
+                            (n, _) => format!("{} D-{n}", a.label),
+                        };
+                        format!("다음 알림 {} · {what}", dday::when_ko(a.at, now.date()))
+                    }
+                    None => "앞으로 울릴 알림 없음".into(),
+                };
+                ui.label(RichText::new(txt).color(p.accent).size(12.5));
+            } else {
+                ui.label(RichText::new("알림 없이 표시만").color(p.faint).size(12.5));
+            }
+        });
+        if !self.d.notify {
+            return;
+        }
+        ui.add_space(4.0);
+        card_frame(p).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let mut del = None;
+            if self.d.alerts.is_empty() {
+                ui.label(RichText::new("알림이 없습니다 — 아래에서 추가하세요").color(p.faint).size(12.5));
+            }
+            for (i, r) in self.d.alerts.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    toggle(ui, p, &mut r.on);
+                    ui.add_space(4.0);
+                    ui.add(
+                        egui::DragValue::new(&mut r.before)
+                            .range(0..=365)
+                            .speed(0.1)
+                            .custom_formatter(|v, _| if v as u32 == 0 { "당일".into() } else { format!("D-{}", v as u32) })
+                            .custom_parser(|s| {
+                                let t = s.trim();
+                                if t == "당일" {
+                                    Some(0.0)
+                                } else {
+                                    t.trim_start_matches("D-").trim_start_matches("d-").trim_end_matches("일").trim().parse::<f64>().ok()
+                                }
+                            }),
+                    );
+                    let t = r.naive();
+                    let (mut h, mut m) = (t.hour(), t.minute());
+                    ui.style_mut().override_font_id = Some(digits(18.0));
+                    let c1 = ui.add(egui::DragValue::new(&mut h).range(0..=23).speed(0.08).custom_formatter(|v, _| format!("{:02}", v as u32))).changed();
+                    ui.label(RichText::new(":").font(digits(18.0)));
+                    let c2 = ui.add(egui::DragValue::new(&mut m).range(0..=59).speed(0.15).custom_formatter(|v, _| format!("{:02}", v as u32))).changed();
+                    ui.style_mut().override_font_id = None;
+                    if c1 || c2 {
+                        r.time = format!("{h:02}:{m:02}");
+                    }
+                    for (l, hh) in [("아침", 8), ("점심", 12), ("저녁", 20)] {
+                        if ui.small_button(l).on_hover_text(format!("{hh:02}:00")).clicked() {
+                            r.time = format!("{hh:02}:00");
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icon_btn(ui, p, "×", "이 알림 빼기").clicked() {
+                            del = Some(i);
+                        }
+                    });
+                });
+            }
+            if let Some(i) = del {
+                self.d.alerts.remove(i);
+            }
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("추가").color(p.muted).size(12.5));
+                let last = self.d.alerts.last().map(|r| r.time.clone()).unwrap_or_else(|| "09:00".into());
+                for n in [0u32, 1, 3, 7, 14, 30] {
+                    let l = if n == 0 { "당일".to_string() } else { format!("D-{n}") };
+                    if ui.small_button(format!("+ {l}")).clicked() {
+                        self.d.alerts.push(crate::model::AlertRule::new(n, &last));
+                    }
+                }
+                ui.separator();
+                ui.add(egui::DragValue::new(&mut self.add_before).range(0..=365).speed(0.1).suffix("일 전"));
+                if ui.small_button("+ 직접").clicked() {
+                    self.d.alerts.push(crate::model::AlertRule::new(self.add_before, &last));
+                }
+            });
+            if self.d.mode == DdayMode::Since {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("알릴 기념일").color(p.muted).size(12.5));
+                    use crate::model::DayStep;
+                    segmented(ui, p, &mut self.d.day_step, &[(DayStep::Every100, "100일마다"), (DayStep::Every1000, "1000일마다"), (DayStep::Off, "안 함")]);
+                    ui.add_space(8.0);
+                    toggle(ui, p, &mut self.d.yearly_ms);
+                    ui.label(RichText::new("주년").size(13.0));
+                });
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("소리").color(p.muted).size(12.5));
+                sound_picker(ui, p, core, "dd-sound", &mut self.d.sound, 160.0, slot, PickTarget::Alarm);
+                ui.add_space(6.0);
+                segmented(ui, p, &mut self.d.ring_once, &[(false, "끌 때까지"), (true, "한 번만")]);
+            });
+            ui.label(RichText::new("알림 창에서 「10분 뒤」 · 「1시간 뒤」로 다시 알림을 받을 수 있습니다.").color(p.faint).size(11.5));
+        });
     }
 
     fn ui(&mut self, ctx: &egui::Context, core: &Arc<Core>, p: &Pal, slot: &PickSlot) -> Outcome {
@@ -890,51 +1017,13 @@ impl DdayEdit {
                     });
                 });
             }
+            ui.add_space(12.0);
+            self.alerts_ui(ui, core, p, slot, &probe);
             ui.add_space(10.0);
             egui::Grid::new("dd-opts").num_columns(2).spacing([20.0, 10.0]).show(ui, |ui| {
                 ui.label(RichText::new("색").color(p.muted).size(12.5));
                 color_swatches(ui, p, &mut self.d.color);
                 ui.end_row();
-                ui.label(RichText::new("알림").color(p.muted).size(12.5));
-                ui.horizontal(|ui| {
-                    toggle(ui, p, &mut self.d.notify);
-                    let what = match self.d.mode {
-                        DdayMode::Until => "그날",
-                        DdayMode::Since => "100일 · 주년마다",
-                        DdayMode::Yearly => "해마다 그날",
-                    };
-                    if self.d.notify {
-                        ui.label(RichText::new(what).color(p.faint).size(12.5));
-                        ui.style_mut().override_font_id = Some(digits(18.0));
-                        ui.add(egui::DragValue::new(&mut self.ah).range(0..=23).speed(0.08).custom_formatter(|v, _| format!("{:02}", v as u32)));
-                        ui.label(RichText::new(":").font(digits(18.0)));
-                        ui.add(egui::DragValue::new(&mut self.am).range(0..=59).speed(0.15).custom_formatter(|v, _| format!("{:02}", v as u32)));
-                        ui.style_mut().override_font_id = None;
-                    } else {
-                        ui.label(RichText::new("알림 없이 표시만").color(p.faint).size(12.5));
-                    }
-                });
-                ui.end_row();
-                if self.d.notify {
-                    ui.label(RichText::new("미리 알림").color(p.muted).size(12.5));
-                    ui.horizontal_wrapped(|ui| {
-                        for n in [30u32, 14, 7, 3, 1] {
-                            let on = self.d.remind.contains(&n);
-                            if ui.selectable_label(on, format!("D-{n}")).clicked() {
-                                if on {
-                                    self.d.remind.retain(|x| *x != n);
-                                } else {
-                                    self.d.remind.push(n);
-                                }
-                            }
-                        }
-                        ui.label(RichText::new("같은 시각에").color(p.faint).size(12.0));
-                    });
-                    ui.end_row();
-                    ui.label(RichText::new("소리").color(p.muted).size(12.5));
-                    ui.horizontal(|ui| sound_picker(ui, p, core, "dd-sound", &mut self.d.sound, 170.0, slot, PickTarget::Alarm));
-                    ui.end_row();
-                }
                 ui.label(RichText::new("사이드바").color(p.muted).size(12.5));
                 ui.horizontal(|ui| {
                     toggle(ui, p, &mut self.d.pinned);
@@ -969,8 +1058,13 @@ impl DdayEdit {
                     if ui.add_enabled_ui(ok, |ui| primary(ui, p, "  저장  ")).inner.clicked() {
                         self.d.title = self.d.title.trim().to_string();
                         self.d.date = self.date.format("%Y-%m-%d").to_string();
-                        self.d.alert_time = format!("{:02}:{:02}", self.ah, self.am);
-                        self.d.remind.sort_unstable_by(|a, b| b.cmp(a));
+                        // 알림 목록 정리: 며칠 전 큰 것부터, 같은 날은 시각순
+                        self.d.alerts.sort_by(|a, b| b.before.cmp(&a.before).then(a.time.cmp(&b.time)));
+                        self.d.alerts.dedup_by(|a, b| a.before == b.before && a.time == b.time);
+                        self.d.remind.clear();
+                        if let Some(r) = self.d.alerts.iter().find(|r| r.before == 0) {
+                            self.d.alert_time = r.time.clone();
+                        }
                         core.upsert_dday(self.d.clone());
                         out = Outcome::Close;
                     }
