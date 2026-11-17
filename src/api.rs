@@ -5,6 +5,7 @@
 //!     GET /api/timers                       모든 타이머 상태
 //!     GET /api/timer?id=<id>&do=<cmd>       특정 타이머 (id 대신 name=<이름> 가능)
 //!     GET /api/show                         메인 창 열기
+//!     GET /api/world · /api/countdowns · /api/ddays   월드타임 · 카운트다운 · 디데이
 use crate::core::Core;
 use crate::engine::Cmd;
 use crate::model::Id;
@@ -142,6 +143,69 @@ fn run(core: Arc<Core>) {
                     "error": st.last_error,
                     "reminders": core.data().reminders.len(),
                 }))
+            }
+            "/api/world" => {
+                let utc = chrono::Utc::now();
+                let lo = crate::world::local_offset_min(utc);
+                let list = core.data().world.clone();
+                Some(serde_json::Value::Array(
+                    list.iter()
+                        .map(|w| match crate::world::at(&w.tz, utc, lo) {
+                            Some(t) => serde_json::json!({
+                                "tz": w.tz,
+                                "name": crate::world::display_name(&w.tz, &w.label),
+                                "time": format!("{:02}:{:02}:{:02}", t.hour, t.minute, t.second),
+                                "date": t.date.to_string(),
+                                "utc": crate::world::utc_label(t.utc_min),
+                                "diff": crate::world::diff_label(t.diff_min),
+                                "day": crate::world::day_label(t.day_diff),
+                            }),
+                            None => serde_json::json!({ "tz": w.tz, "error": "unknown time zone" }),
+                        })
+                        .collect(),
+                ))
+            }
+            "/api/countdowns" => {
+                let now = chrono::Local::now().naive_local();
+                let list = core.data().countdowns.clone();
+                Some(serde_json::Value::Array(
+                    list.iter()
+                        .map(|c| {
+                            let rem = c.target_dt().map(|t| (t - now).num_seconds());
+                            serde_json::json!({
+                                "id": c.id.to_string(),
+                                "title": c.title,
+                                "target": c.target,
+                                "remaining": rem,
+                                "remaining_text": rem.filter(|s| *s > 0).map(|s| { let (d, cl) = crate::dday::remain_text(s); format!("{d} {cl}").trim().to_string() }),
+                                "done": rem.map(|s| s <= 0).unwrap_or(false),
+                                "fired": c.fired,
+                            })
+                        })
+                        .collect(),
+                ))
+            }
+            "/api/ddays" => {
+                let today = chrono::Local::now().date_naive();
+                let list = core.data().ddays.clone();
+                Some(serde_json::Value::Array(
+                    list.iter()
+                        .map(|d| {
+                            let i = crate::dday::info(d, today);
+                            serde_json::json!({
+                                "id": d.id.to_string(),
+                                "title": d.title,
+                                "date": d.date,
+                                "mode": format!("{:?}", d.mode).to_lowercase(),
+                                "label": i.as_ref().map(|i| i.big.clone()),
+                                "detail": i.as_ref().map(|i| i.small.clone()),
+                                "target": i.as_ref().map(|i| i.target.to_string()),
+                                "days": i.as_ref().map(|i| i.days),
+                                "next": i.as_ref().and_then(|i| i.next.as_ref()).map(|n| serde_json::json!({ "name": n.0, "date": n.1.to_string(), "days": n.2 })),
+                            })
+                        })
+                        .collect(),
+                ))
             }
             "/api/show" => {
                 core.open_main.store(true, Ordering::Relaxed);

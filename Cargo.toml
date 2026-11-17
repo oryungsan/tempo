@@ -1,8 +1,8 @@
 [package]
 name = "tempo"
-version = "1.0.4"
+version = "1.1.0"
 edition = "2021"
-description = "Tempo — 타이머 · 알람 · 리마인더 · 스톱워치 (Windows)"
+description = "Tempo — 타이머 · 알람 · 리마인더 · 스톱워치 · 카운트다운 · 디데이 · 월드타임 (Windows)"
 license = "MIT"
 
 [[bin]]
@@ -32,6 +32,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+chrono-tz = "0.10"
 
 [profile.release]
 opt-level = 3

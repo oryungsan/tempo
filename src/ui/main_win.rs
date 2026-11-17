@@ -16,6 +16,9 @@ pub enum Page {
     Alarms,
     Reminders,
     Stopwatch,
+    Countdown,
+    Dday,
+    World,
     Settings,
 }
 
@@ -45,11 +48,12 @@ pub struct MainState {
     /// 집중 화면으로 보는 타이머
     pub focus: Option<Id>,
     pub rem: super::reminders::RemState,
+    pub clk: super::clocks::ClockState,
 }
 
 impl MainState {
     pub fn new() -> Self {
-        MainState { page: Page::Timers, timer_edit: None, alarm_edit: None, sw: Stopwatch::default(), slot: Default::default(), reset_cards: false, focus: None, rem: Default::default() }
+        MainState { page: Page::Timers, timer_edit: None, alarm_edit: None, sw: Stopwatch::default(), slot: Default::default(), reset_cards: false, focus: None, rem: Default::default(), clk: Default::default() }
     }
 
     pub fn edit_timer(&mut self, core: &Core, id: Id) {
@@ -80,8 +84,9 @@ pub fn ui(ctx: &egui::Context, core: &Arc<Core>, st: &mut MainState, p: &Pal) {
             e.apply_pick(t, s.clone());
         }
         if let Some(e) = st.rem.edit.as_mut() {
-            e.apply_pick(t, s);
+            e.apply_pick(t, s.clone());
         }
+        st.clk.apply_pick(t, s);
     }
     let views = core.views();
     sidebar(ctx, core, st, p, &views);
@@ -93,7 +98,11 @@ pub fn ui(ctx: &egui::Context, core: &Arc<Core>, st: &mut MainState, p: &Pal) {
             Page::Stopwatch => stopwatch_page(ui, st, p),
             Page::Settings => settings_page(ui, core, st, p),
             Page::Reminders => super::reminders::page(ui, core, &mut st.rem, p),
+            Page::Countdown => super::clocks::countdown_page(ui, core, &mut st.clk, p),
+            Page::Dday => super::clocks::dday_page(ui, core, &mut st.clk, p),
+            Page::World => super::clocks::world_page(ui, core, &mut st.clk, p),
         });
+    st.clk.modals(ctx, core, p, &st.slot);
     if let Some(e) = st.timer_edit.as_mut() {
         if let Outcome::Close = e.ui(ctx, core, p, &st.slot) {
             st.timer_edit = None;
@@ -164,9 +173,12 @@ fn sidebar(ctx: &egui::Context, core: &Arc<Core>, st: &mut MainState, p: &Pal, v
                 (Page::Alarms, "⏰", "알람", if alarms_on > 0 { format!("{alarms_on}") } else { String::new() }),
                 (Page::Reminders, "☑", "리마인더", { let n = super::reminders::badge(core); if n > 0 { format!("{n}") } else { String::new() } }),
                 (Page::Stopwatch, "⏱", "스톱워치", if sw_on { "●".into() } else { String::new() }),
+                (Page::Countdown, "🏁", "카운트다운", { let n = super::clocks::countdown_badge(core); if n > 0 { format!("{n}") } else { String::new() } }),
+                (Page::Dday, "📅", "디데이", { let n = super::clocks::dday_badge(core); if n > 0 { "오늘".into() } else { String::new() } }),
+                (Page::World, "🌐", "월드타임", String::new()),
                 (Page::Settings, "⚙", "설정", String::new()),
             ] {
-                let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), Sense::click());
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 38.0), Sense::click());
                 let sel = st.page == page;
                 if sel {
                     ui.painter().rect_filled(rect, cr(10.0), if p.dark { p.card_hi } else { Color32::WHITE });
@@ -188,33 +200,50 @@ fn sidebar(ctx: &egui::Context, core: &Arc<Core>, st: &mut MainState, p: &Pal, v
                 if resp.clicked() {
                     st.page = page;
                 }
-                ui.add_space(2.0);
+                ui.add_space(-4.0);
             }
-            // 아래: 실행 중 요약
+            // 아래: 시계 · 고정 항목 · 실행 중 요약 — 메뉴와 겹치지 않게 남은 높이만큼만
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                let row_h = 26.0;
+                if ui.available_height() < 64.0 {
+                    return;
+                }
                 let now = chrono::Local::now();
                 const WD: [&str; 7] = ["월", "화", "수", "목", "금", "토", "일"];
                 let wd = WD[chrono::Datelike::weekday(&now).num_days_from_monday() as usize];
                 ui.label(RichText::new(format!("{} {wd}요일", now.format("%m월 %d일"))).color(p.faint).size(12.0));
                 ui.label(RichText::new(now.format("%H:%M").to_string()).font(digits(26.0)).color(p.muted));
                 ui.add_space(6.0);
-                for v in views.iter().filter(|v| v.phase.active()).take(3).collect::<Vec<_>>().into_iter().rev() {
+                let mut rows: Vec<(Color32, String, String, Color32)> = Vec::new();
+                for v in views.iter().filter(|v| v.phase.active()).take(3) {
                     let rem = if v.n > 1 { v.step_rem } else { v.total_rem };
-                    ui.horizontal(|ui| {
-                        ui.painter().circle_filled(ui.cursor().min + egui::vec2(4.0, 9.0), 3.5, color_of(&v.color));
-                        ui.add_space(12.0);
-                        ui.label(RichText::new(&v.name).color(p.muted).size(12.5));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new(mmss(rem)).font(digits(13.0)).color(if v.phase == Phase::Paused { p.amber } else { p.text }));
-                        });
-                    });
+                    rows.push((color_of(&v.color), v.name.clone(), mmss(rem), if v.phase == Phase::Paused { p.amber } else { p.text }));
+                }
+                for (col, name, val) in super::clocks::pinned(core).into_iter().take(3) {
+                    rows.push((col, name, val, p.text));
+                }
+                // 아래에서 위로 쌓음 → 실행 중 타이머가 시계 바로 위
+                for (col, name, val, vcol) in rows {
+                    if ui.available_height() < row_h + 8.0 {
+                        break;
+                    }
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), Sense::hover());
+                    let pt = ui.painter();
+                    pt.circle_filled(Pos2::new(r.left() + 4.0, r.center().y), 3.5, col);
+                    let vg = ui.fonts(|f| f.layout_no_wrap(val, digits(13.0), vcol));
+                    let vw = vg.size().x;
+                    pt.galley(Pos2::new(r.right() - vw, r.center().y - vg.size().y / 2.0), vg, vcol);
+                    let mut job = egui::text::LayoutJob::single_section(name, egui::TextFormat { font_id: FontId::proportional(12.5), color: p.muted, ..Default::default() });
+                    job.wrap = egui::text::TextWrapping::truncate_at_width((r.width() - vw - 24.0).max(20.0));
+                    let ng = ui.fonts(|f| f.layout_job(job));
+                    pt.galley(Pos2::new(r.left() + 14.0, r.center().y - ng.size().y / 2.0), ng, p.muted);
                 }
             });
         });
 }
 
 /// 오른쪽에 버튼 여러 개 (첫 번째 = 강조) — 누른 번호
-fn header_actions(ui: &mut Ui, p: &Pal, title: &str, sub: &str, actions: &[&str]) -> Option<usize> {
+pub(super) fn header_actions(ui: &mut Ui, p: &Pal, title: &str, sub: &str, actions: &[&str]) -> Option<usize> {
     let mut hit = None;
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
@@ -304,7 +333,7 @@ fn timers_page(ui: &mut Ui, core: &Arc<Core>, st: &mut MainState, p: &Pal, views
     });
 }
 
-fn empty(ui: &mut Ui, p: &Pal, icon: &str, title: &str, sub: &str) {
+pub(super) fn empty(ui: &mut Ui, p: &Pal, icon: &str, title: &str, sub: &str) {
     ui.add_space(80.0);
     ui.vertical_centered(|ui| {
         ui.label(RichText::new(icon).size(42.0).color(p.faint));

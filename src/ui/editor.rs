@@ -133,7 +133,7 @@ pub fn hotkey_field(ui: &mut Ui, p: &Pal, value: &mut String, capturing: &mut bo
     }
 }
 
-fn color_swatches(ui: &mut Ui, p: &Pal, color: &mut String) {
+pub fn color_swatches(ui: &mut Ui, p: &Pal, color: &mut String) {
     ui.horizontal(|ui| {
         for hex in PALETTE {
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), Sense::click());

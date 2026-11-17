@@ -320,6 +320,138 @@ pub struct Data {
     /// To Do 에서도 지워야 할 (목록 id, 작업 id) — 다음 동기화 때 처리
     #[serde(default)]
     pub todo_deleted: Vec<(String, String)>,
+    /// 월드타임 — 보는 도시들
+    #[serde(default)]
+    pub world: Vec<WorldClock>,
+    /// 카운트다운 — 정한 날짜·시각까지
+    #[serde(default)]
+    pub countdowns: Vec<Countdown>,
+    /// 디데이
+    #[serde(default)]
+    pub ddays: Vec<Dday>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct WorldClock {
+    pub id: Id,
+    /// IANA 시간대 이름 (예: "America/New_York")
+    pub tz: String,
+    /// 보이는 이름 (비우면 도시 목록의 이름)
+    #[serde(default)]
+    pub label: String,
+}
+
+impl WorldClock {
+    pub fn new(tz: &str) -> Self {
+        WorldClock { id: new_id(), tz: tz.into(), label: String::new() }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Countdown {
+    pub id: Id,
+    pub title: String,
+    /// 로컬 시각 "YYYY-MM-DDTHH:MM:SS"
+    pub target: String,
+    /// 만든(또는 마지막으로 목표를 바꾼) 시각 unix 초 — 진행 막대의 시작점
+    #[serde(default)]
+    pub since: i64,
+    pub color: String,
+    /// 목표 시각에 알림 창 + 소리
+    #[serde(default = "yes")]
+    pub notify: bool,
+    #[serde(default = "cd_sound")]
+    pub sound: String,
+    /// 이미 울렸음 (목표를 바꾸면 다시 false)
+    #[serde(default)]
+    pub fired: bool,
+    /// 사이드바 아래에 고정
+    #[serde(default)]
+    pub pinned: bool,
+}
+
+fn cd_sound() -> String {
+    "arpeggio".into()
+}
+
+impl Countdown {
+    pub fn new(title: &str, target: chrono::NaiveDateTime, color: &str) -> Self {
+        Countdown {
+            id: new_id(),
+            title: title.into(),
+            target: fmt_target(target),
+            since: crate::engine::unix_now(),
+            color: color.into(),
+            notify: true,
+            sound: cd_sound(),
+            fired: false,
+            pinned: false,
+        }
+    }
+    pub fn target_dt(&self) -> Option<chrono::NaiveDateTime> {
+        parse_target(&self.target)
+    }
+}
+
+pub fn parse_target(s: &str) -> Option<chrono::NaiveDateTime> {
+    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M"))
+        .ok()
+}
+
+pub fn fmt_target(d: chrono::NaiveDateTime) -> String {
+    d.format("%Y-%m-%dT%H:%M:%S").to_string()
+}
+
+/// 디데이 세는 방식
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DdayMode {
+    /// 그날까지 남은 날 — D-23 · D-Day · D+5
+    Until,
+    /// 그날부터 — 첫날 = 1일째 (기념일 · 사귄 날 · 금연)
+    Since,
+    /// 해마다 돌아오는 날 — 생일 · 결혼기념일 (다음 그날까지 D-n)
+    Yearly,
+}
+
+impl DdayMode {
+    pub const ALL: [DdayMode; 3] = [DdayMode::Until, DdayMode::Since, DdayMode::Yearly];
+    pub fn label(self) -> &'static str {
+        match self {
+            DdayMode::Until => "남은 날",
+            DdayMode::Since => "그날부터",
+            DdayMode::Yearly => "매년",
+        }
+    }
+    pub fn desc(self) -> &'static str {
+        match self {
+            DdayMode::Until => "시험 · 여행 · 마감 — D-23, 당일 D-Day, 지나면 D+5",
+            DdayMode::Since => "기념일 · 금연 — 그날을 1일째로 세고 100일 · 1주년을 알려 줍니다",
+            DdayMode::Yearly => "생일 · 결혼기념일 — 해마다 다음 그날까지 셉니다",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Dday {
+    pub id: Id,
+    pub title: String,
+    /// "YYYY-MM-DD"
+    pub date: String,
+    pub mode: DdayMode,
+    pub color: String,
+    /// 사이드바 아래에 고정
+    #[serde(default)]
+    pub pinned: bool,
+}
+
+impl Dday {
+    pub fn new(title: &str, date: chrono::NaiveDate, mode: DdayMode, color: &str) -> Self {
+        Dday { id: new_id(), title: title.into(), date: date.format("%Y-%m-%d").to_string(), mode, color: color.into(), pinned: false }
+    }
+    pub fn date_nd(&self) -> Option<chrono::NaiveDate> {
+        chrono::NaiveDate::parse_from_str(&self.date, "%Y-%m-%d").ok()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -452,6 +584,9 @@ impl Data {
             settings: Settings::default(),
             reminders: vec![],
             todo_deleted: vec![],
+            world: ["America/New_York", "Europe/London", "Asia/Tokyo"].iter().map(|t| WorldClock::new(t)).collect(),
+            countdowns: vec![],
+            ddays: vec![],
         }
     }
 }

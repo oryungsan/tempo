@@ -7,6 +7,7 @@ mod alarm;
 mod api;
 mod audio;
 mod core;
+mod dday;
 mod engine;
 mod hotkey;
 mod model;
@@ -14,6 +15,7 @@ mod store;
 mod todo;
 mod tray;
 mod ui;
+mod world;
 
 use eframe::egui;
 use std::io::{Read, Write};
@@ -105,9 +107,10 @@ fn main() {
         persist_window: false,
         ..Default::default()
     };
-    // 시험용: --page timers|alarms|stopwatch|settings · --edit <타이머 이름> · --new-alarm
+    // 시험용: --page timers|alarms|reminders|stopwatch|countdown|dday|world|settings · --edit <타이머 이름> · --new-alarm
+    //         --open new-countdown|new-dday|city (편집 창 바로 열기)
     let arg_after = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
-    let start = ui::StartOpts { show_main, page: arg_after("--page"), edit: arg_after("--edit"), new_alarm: args.iter().any(|a| a == "--new-alarm"), focus: arg_after("--focus") };
+    let start = ui::StartOpts { show_main, page: arg_after("--page"), edit: arg_after("--edit"), new_alarm: args.iter().any(|a| a == "--new-alarm"), focus: arg_after("--focus"), open: arg_after("--open") };
     let c2 = core.clone();
     if let Err(e) = eframe::run_native("tempo", options, Box::new(move |cc| Ok(Box::new(ui::App::new(cc, c2, start))))) {
         store::log(format!("window failed: {e}"));

@@ -38,6 +38,7 @@ pub enum RingKind {
     Alarm(Id),
     Timer(Id),
     Reminder(Id),
+    Countdown(Id),
 }
 
 pub struct Ring {
@@ -498,6 +499,7 @@ impl Core {
         }
         self.tick_alarms();
         self.tick_reminders();
+        self.tick_countdowns();
         // 10분 넘게 울린 건 정리
         let stale: Vec<RingKind> =
             self.rings.lock().unwrap().iter().filter(|r| r.since.elapsed() > Duration::from_secs(600)).map(|r| r.kind).collect();
@@ -612,6 +614,51 @@ impl Core {
             log(format!("reminder '{}' ringing ({key})", r.title));
             let sub = if r.notes.trim().is_empty() { format!("리마인더 · {}", d.format("%H:%M")) } else { format!("리마인더 · {} · {}", d.format("%H:%M"), r.notes.lines().next().unwrap_or("")) };
             self.push_ring(RingKind::Reminder(r.id), r.title.clone(), sub, Some(r.sound.clone()));
+        }
+    }
+
+    // ── 카운트다운 ───────────────────────────────────────
+
+    pub fn upsert_countdown(&self, c: crate::model::Countdown) {
+        self.update(|d| match d.countdowns.iter_mut().find(|x| x.id == c.id) {
+            Some(x) => *x = c,
+            None => d.countdowns.push(c),
+        });
+    }
+
+    pub fn delete_countdown(&self, id: Id) {
+        self.dismiss(RingKind::Countdown(id));
+        self.update(|d| d.countdowns.retain(|c| c.id != id));
+    }
+
+    fn tick_countdowns(&self) {
+        let now = Local::now().naive_local();
+        let due: Vec<crate::model::Countdown> = self
+            .data()
+            .countdowns
+            .iter()
+            .filter(|c| !c.fired && c.target_dt().map(|t| t <= now).unwrap_or(false))
+            .cloned()
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        let ids: Vec<Id> = due.iter().map(|c| c.id).collect();
+        self.update(|d| {
+            for c in d.countdowns.iter_mut().filter(|c| ids.contains(&c.id)) {
+                c.fired = true;
+            }
+        });
+        for c in due {
+            let t = c.target_dt().unwrap();
+            // 컴퓨터가 꺼져 있던 동안 지난 건 12시간 안이면 울림, 더 오래면 조용히 넘김
+            if !c.notify || now - t > chrono::Duration::hours(12) {
+                log(format!("countdown '{}' reached ({}) — silent", c.title, c.target));
+                continue;
+            }
+            log(format!("countdown '{}' reached ({}) ringing", c.title, c.target));
+            let sub = format!("카운트다운 · {} {}", crate::dday::date_ko(t.date(), now.date()), t.format("%H:%M"));
+            self.push_ring(RingKind::Countdown(c.id), c.title.clone(), sub, Some(c.sound.clone()));
         }
     }
 

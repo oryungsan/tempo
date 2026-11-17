@@ -1,6 +1,7 @@
 //! 창 관리. 루트 뷰포트 = 보이지 않는 1px 호스트(늘 그려짐) — 메인 창·카드·알림 창은 모두 그 아래 자식 창.
 //! (메인 창을 닫아 트레이로 보내도 카드와 알림이 계속 갱신되게 하려는 구조)
 pub mod card;
+pub mod clocks;
 pub mod drag;
 pub mod editor;
 pub mod focus;
@@ -26,6 +27,7 @@ pub struct StartOpts {
     pub edit: Option<String>,
     pub new_alarm: bool,
     pub focus: Option<String>,
+    pub open: Option<String>,
 }
 
 pub struct App {
@@ -55,6 +57,9 @@ impl App {
             Some("stopwatch") => main_win::Page::Stopwatch,
             Some("settings") => main_win::Page::Settings,
             Some("reminders") => main_win::Page::Reminders,
+            Some("countdown") => main_win::Page::Countdown,
+            Some("dday") => main_win::Page::Dday,
+            Some("world") => main_win::Page::World,
             _ => main_win::Page::Timers,
         };
         if let Some(name) = o.edit {
@@ -65,6 +70,23 @@ impl App {
         }
         if let Some(name) = o.focus {
             main.focus = core.data().timers.iter().find(|t| t.name == name).map(|t| t.id);
+        }
+        match o.open.as_deref() {
+            Some("new-countdown") => {
+                main.page = main_win::Page::Countdown;
+                let t = chrono::Local::now().naive_local() + chrono::Duration::hours(1);
+                main.clk.cd_edit = Some(clocks::CountdownEdit::new(crate::model::Countdown::new("", t, crate::model::PALETTE[0]), true));
+            }
+            Some("new-dday") => {
+                main.page = main_win::Page::Dday;
+                let d = chrono::Local::now().date_naive() + chrono::Duration::days(30);
+                main.clk.dd_edit = Some(clocks::DdayEdit::new(crate::model::Dday::new("", d, crate::model::DdayMode::Until, crate::model::PALETTE[5]), true));
+            }
+            Some("city") => {
+                main.page = main_win::Page::World;
+                main.clk.picker = Some(Default::default());
+            }
+            _ => {}
         }
         if o.new_alarm {
             main.page = main_win::Page::Alarms;
@@ -201,7 +223,10 @@ impl eframe::App for App {
 
         ring::show(ctx, &core, &p);
 
-        let busy = views.iter().any(|v| v.phase == Phase::Running) || !core.rings().is_empty() || self.main.sw.running();
+        // 초 단위로 바뀌는 화면 (카운트다운 · 월드타임) · 사이드바 고정 카운트다운
+        let live_page = self.main_open && matches!(self.main.page, main_win::Page::Countdown | main_win::Page::World);
+        let pinned_cd = self.main_open && core.data().countdowns.iter().any(|c| c.pinned && !c.fired);
+        let busy = views.iter().any(|v| v.phase == Phase::Running) || !core.rings().is_empty() || self.main.sw.running() || live_page || pinned_cd;
         if bench {
             core.update_ms.lock().unwrap().push(t0.elapsed().as_secs_f32() * 1000.0);
             ctx.request_repaint();
