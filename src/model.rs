@@ -60,6 +60,9 @@ pub struct TimerDef {
     pub warn_each: bool,
     #[serde(default = "warn_sound")]
     pub warn_sound: String,
+    /// 끝나기 전 화면 효과 (예고음 구간 동안)
+    #[serde(default = "default_fx")]
+    pub warn_fx: Vec<WarnFx>,
     /// false = 단계가 끝날 때마다 멈추고 ▶ 를 기다림
     #[serde(default = "yes")]
     pub auto_advance: bool,
@@ -143,6 +146,48 @@ impl Pomo {
     }
 }
 
+/// 끝나기 전(예고음 구간) 화면 효과
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum WarnFx {
+    Blink,
+    Pulse,
+    Shake,
+    Pop,
+    Tint,
+    Edge,
+    ShowCard,
+}
+
+impl WarnFx {
+    pub const ALL: [WarnFx; 7] = [WarnFx::Blink, WarnFx::Pulse, WarnFx::Shake, WarnFx::Pop, WarnFx::Tint, WarnFx::Edge, WarnFx::ShowCard];
+    pub fn label(self) -> &'static str {
+        match self {
+            WarnFx::Blink => "깜박임",
+            WarnFx::Pulse => "테두리 빛",
+            WarnFx::Shake => "흔들림",
+            WarnFx::Pop => "튀어오름",
+            WarnFx::Tint => "점점 빨갛게",
+            WarnFx::Edge => "화면 테두리",
+            WarnFx::ShowCard => "카드 띄우기",
+        }
+    }
+    pub fn desc(self) -> &'static str {
+        match self {
+            WarnFx::Blink => "「삐」 소리에 맞춰 1초마다 카드가 번쩍",
+            WarnFx::Pulse => "카드 테두리가 타이머 색으로 숨 쉬듯 빛남 (끝에 가까울수록 빨라짐)",
+            WarnFx::Shake => "1초마다 카드가 좌우로 흔들림",
+            WarnFx::Pop => "1초마다 카드가 살짝 커졌다 돌아옴",
+            WarnFx::Tint => "끝에 가까울수록 카드가 점점 붉게 물듦",
+            WarnFx::Edge => "모니터 가장자리 전체가 번쩍 — 다른 창을 보고 있어도 보임 (클릭은 그대로 통과)",
+            WarnFx::ShowCard => "카드를 꺼 뒀거나 닫았어도 끝나기 전에는 카드를 띄움",
+        }
+    }
+}
+
+pub fn default_fx() -> Vec<WarnFx> {
+    vec![WarnFx::Blink, WarnFx::Pulse]
+}
+
 fn when_active() -> CardMode {
     CardMode::WhenActive
 }
@@ -180,6 +225,7 @@ impl TimerDef {
             warn_secs: 10,
             warn_each: false,
             warn_sound: "tick".into(),
+            warn_fx: default_fx(),
             auto_advance: true,
             pomodoro: None,
             style: None,

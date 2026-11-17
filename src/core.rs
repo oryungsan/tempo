@@ -102,6 +102,8 @@ pub struct Core {
     pub ui_hold: AtomicBool,
     /// 메인 창이 열려 있음 — 업데이트 후 다시 열기
     pub main_visible: AtomicBool,
+    /// 끝나기 전 화면 효과 미리 보기 (타이머, 시작, 효과들)
+    pub fx_preview: Mutex<Option<(Id, Instant, Vec<crate::model::WarnFx>)>>,
     /// 디데이 「다시 알림」 — id → (울릴 시각, 알림 문구)
     dday_snooze: Mutex<HashMap<Id, (chrono::NaiveDateTime, String)>>,
     stats: Mutex<Stats>,
@@ -137,6 +139,7 @@ impl Core {
             focus_request: Mutex::new(None),
             clock_request: Mutex::new(None),
             dday_snooze: Mutex::new(HashMap::new()),
+            fx_preview: Mutex::new(None),
             update_state: Mutex::new(Default::default()),
             ui_hold: AtomicBool::new(false),
             main_visible: AtomicBool::new(false),

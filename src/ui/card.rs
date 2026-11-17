@@ -413,6 +413,15 @@ fn draw(ui: &mut egui::Ui, ctx: &egui::Context, core: &Arc<Core>, def: &TimerDef
     if expanded {
         paint_steps(&p, ctx, def, v, k, pc, list_area);
     }
+    // 끝나기 전 화면 효과 (깜박임 · 테두리 빛 · 점점 빨갛게 덧그림, 흔들림 · 튀어오름 = 그림 전체 이동)
+    match super::fx::active(core, def, v, ctx.input(|i| i.time)) {
+        Some(fx) => {
+            let area = if style == Style::Ring { super::fx::Area::Circle(face.center(), face.width() / 2.0) } else { super::fx::Area::Round(card, 16.0 * k) };
+            super::fx::overlay(&p, area, &fx, pc, k);
+            ctx.set_transform_layer(ui.layer_id(), super::fx::transform(&fx, card, k));
+        }
+        None => ctx.set_transform_layer(ui.layer_id(), egui::emath::TSTransform::IDENTITY),
+    }
     // 닫기 × — 카드 위에 마우스가 있을 때만 (그 타이머를 다시 시작하면 다시 뜸)
     let hovering = ctx.input(|i| i.pointer.hover_pos()).map(|q| card.contains(q)).unwrap_or(false);
     if hovering {

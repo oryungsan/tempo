@@ -6,6 +6,7 @@ pub mod drag;
 pub mod editor;
 pub mod event_card;
 pub mod focus;
+pub mod fx;
 pub mod styles;
 pub mod main_win;
 pub mod native_menu;
@@ -217,7 +218,9 @@ impl eframe::App for App {
         let mut shown = Vec::new();
         for def in &defs {
             let Some(v) = views.iter().find(|v| v.id == def.id) else { continue };
-            if !card::card_visible(def, v) || core.card_hidden(def.id) {
+            // 「카드 띄우기」 효과 = 꺼 둔 카드도 끝나기 전엔 보임
+            let fx_show = fx::show_card(&core, def, v);
+            if !fx_show && (!card::card_visible(def, v) || core.card_hidden(def.id)) {
                 continue;
             }
             let style = styles::style_of(def, settings.style);
@@ -253,6 +256,8 @@ impl eframe::App for App {
         self.ev_cards.retain(|key, _| ev_shown.contains(key));
 
         ring::show(ctx, &core, &p);
+        fx::edge(ctx, &core, &defs, &views, &p);
+        let fx_live = fx::any_live(&core, &defs, &views);
 
         // 업데이트 판단용: 편집 창 · 스톱워치 · 메인 창
         let m = &self.main;
@@ -267,7 +272,7 @@ impl eframe::App for App {
             core.update_ms.lock().unwrap().push(t0.elapsed().as_secs_f32() * 1000.0);
             ctx.request_repaint();
         } else {
-            ctx.request_repaint_after(if busy { Duration::from_millis(100) } else { Duration::from_millis(500) });
+            ctx.request_repaint_after(Duration::from_millis(if fx_live { 16 } else if busy { 100 } else { 500 }));
         }
     }
 }

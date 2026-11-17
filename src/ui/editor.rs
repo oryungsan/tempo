@@ -346,6 +346,25 @@ impl TimerEdit {
                     }
                 });
                 ui.end_row();
+                if self.def.warn_secs > 0 {
+                    field_label(ui, p, "끝나기 전 화면 효과");
+                    ui.horizontal_wrapped(|ui| {
+                        for fx in crate::model::WarnFx::ALL {
+                            let on = self.def.warn_fx.contains(&fx);
+                            if ui.selectable_label(on, fx.label()).on_hover_text(fx.desc()).clicked() {
+                                if on {
+                                    self.def.warn_fx.retain(|x| *x != fx);
+                                } else {
+                                    self.def.warn_fx.push(fx);
+                                }
+                            }
+                        }
+                        if ui.small_button("▶ 미리 보기").on_hover_text("5초 동안 고른 효과를 보여 줍니다 (카드는 저장된 타이머만)").clicked() {
+                            super::fx::start_preview(core, self.def.id, self.def.warn_fx.clone());
+                        }
+                    });
+                    ui.end_row();
+                }
                 if self.def.steps.len() > 1 || self.def.repeat {
                     field_label(ui, p, "단계 사이");
                     segmented(ui, p, &mut self.def.auto_advance, &[(true, "자동으로 이어서"), (false, "멈추고 ▶ 기다리기")]);

@@ -317,7 +317,12 @@ fn timers_page(ui: &mut Ui, core: &Arc<Core>, st: &mut MainState, p: &Pal, views
     let global_style = core.data().settings.style;
     if let Some(fid) = st.focus {
         if let (Some(def), Some(v)) = (defs.iter().find(|t| t.id == fid), views.iter().find(|v| v.id == fid)) {
-            match super::focus::ui(ui, core, p, def, v, styles::style_of(def, global_style)) {
+            let fr = ui.max_rect();
+            let act = super::focus::ui(ui, core, p, def, v, styles::style_of(def, global_style));
+            if let Some(fx) = super::fx::active(core, def, v, ui.input(|i| i.time)) {
+                super::fx::overlay(ui.painter(), super::fx::Area::Round(fr.expand(8.0), 18.0), &fx, p, 1.6);
+            }
+            match act {
                 super::focus::Action::Back => st.focus = None,
                 super::focus::Action::Edit => st.timer_edit = Some(TimerEdit::new(def.clone(), false)),
                 super::focus::Action::None => {}
@@ -568,6 +573,10 @@ fn timer_card(ui: &mut Ui, core: &Arc<Core>, st: &mut MainState, p: &Pal, def: &
         if b.on_hover_text("다음 단계로").clicked() {
             core.cmd(def.id, Cmd::Skip, "main");
         }
+    }
+    // 끝나기 전 화면 효과
+    if let Some(fx) = super::fx::active(core, def, v, ui.input(|i| i.time)) {
+        super::fx::overlay(&pt, super::fx::Area::Round(rect, 16.0), &fx, p, 1.0);
     }
 }
 

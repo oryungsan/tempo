@@ -92,6 +92,8 @@ pub enum Shape {
     Ellipse { w: i32, h: i32 },
     /// 원형 본체(지름 d) + 그 아래 펼친 목록 판 (전체 높이 h)
     RingList { w: i32, d: i32, h: i32, r: i32, gap: i32 },
+    /// 가장자리 띠만 (화면 테두리 효과) — 두께 t
+    Frame { w: i32, h: i32, t: i32 },
 }
 
 /// 적용했으면 true (창을 아직 못 찾았으면 false → 다음 프레임에 다시)
@@ -114,6 +116,14 @@ pub fn set_shape(title: &str, shape: Shape) -> bool {
                 let a = CreateEllipticRgn(0, 0, w + 1, d + 1);
                 let b = CreateRoundRectRgn(0, d + gap, w + 1, h + 1, r * 2, r * 2);
                 CombineRgn(a, a, b, RGN_OR);
+                DeleteObject(b);
+                a
+            }
+            Shape::Frame { w, h, t } => {
+                use windows_sys::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, RGN_DIFF};
+                let a = CreateRectRgn(0, 0, w, h);
+                let b = CreateRectRgn(t, t, w - t, h - t);
+                CombineRgn(a, a, b, RGN_DIFF);
                 DeleteObject(b);
                 a
             }
