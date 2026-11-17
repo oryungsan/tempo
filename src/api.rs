@@ -7,7 +7,7 @@
 //!     GET /api/show                         메인 창 열기
 //!     GET /api/world · /api/countdowns · /api/ddays   월드타임 · 카운트다운 · 디데이
 //!     GET /api/update[?do=check|apply]       자동 업데이트 상태 · 지금 확인 · 지금 업데이트
-//!     GET /api/sync[?mode=host|join|off&code=&host=&sound=on|off]   PC 연동 상태 · 설정
+//!     GET /api/sync[?mode=host|join|off&code=&host=&sound=on|off&find=1]   PC 연동 상태 · 설정 · 주변 찾기
 use crate::core::Core;
 use crate::engine::Cmd;
 use crate::model::Id;
@@ -211,6 +211,11 @@ fn run(core: Arc<Core>) {
             }
             "/api/sync" => {
                 // 설정 바꾸기: ?mode=host|join|off &code= &host= &port= &sound=on|off
+                if get("find").is_some() {
+                    let port = core.data().settings.sync.port;
+                    crate::sync::discover_async(port);
+                    std::thread::sleep(Duration::from_millis(1800));
+                }
                 let (mode, code, host, port, sound) = (get("mode"), get("code"), get("host"), get("port"), get("sound"));
                 if mode.is_some() || code.is_some() || host.is_some() || port.is_some() || sound.is_some() {
                     core.update(|d| {

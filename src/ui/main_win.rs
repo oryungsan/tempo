@@ -994,7 +994,8 @@ fn style_grid(ui: &mut Ui, p: &Pal, style: &mut Style) {
 /// 설정 — PC 연동
 fn sync_section(ui: &mut Ui, p: &Pal, s: &mut crate::model::SyncSettings) {
     use crate::model::SyncMode;
-    ui.label(RichText::new("Tempo 가 깔린 다른 PC 와 타이머 · 알람 · 리마인더 · 카운트다운 · 디데이 · 월드타임과 타이머 진행 상태를 똑같이 맞춥니다. 한 PC 는 호스트, 나머지는 참여로 두고 같은 연동 코드를 넣으세요. 카드 위치 · 테마 · 볼륨은 PC 마다 따로입니다.").color(p.muted).size(12.5));
+    use crate::sync::Fw;
+    ui.label(RichText::new("Tempo 가 깔린 다른 PC 와 타이머 · 알람 · 리마인더 · 카운트다운 · 디데이 · 월드타임과 타이머 진행 상태를 똑같이 맞춥니다. 한 PC 는 호스트, 나머지는 참여로 두세요. 같은 공유기(내부망) 또는 Tailscale 로 연결된 PC 끼리 됩니다. 주고받는 내용은 연동 코드로 암호화됩니다.").color(p.muted).size(12.5));
     ui.add_space(6.0);
     row(ui, p, "이 PC", "", |ui| {
         let before = s.mode;
@@ -1002,17 +1003,26 @@ fn sync_section(ui: &mut Ui, p: &Pal, s: &mut crate::model::SyncSettings) {
         if s.mode == SyncMode::Host && before != SyncMode::Host && s.code.trim().is_empty() {
             s.code = crate::sync::new_code();
         }
+        if s.mode == SyncMode::Join && before != SyncMode::Join {
+            crate::sync::discover_async(s.port);
+        }
     });
     let st = crate::sync::status();
+    let peers = crate::sync::peers();
     if s.mode != SyncMode::Off {
         ui.separator();
-        let (txt, col) = match &st.error {
-            Some(e) if crate::sync::peers().is_empty() => (format!("{} · {e}", st.state), p.amber),
-            _ => (st.state.clone(), if crate::sync::peers().is_empty() { p.muted } else { p.green }),
-        };
-        ui.label(RichText::new(txt).color(col).size(13.0));
-        for (n, a, t) in crate::sync::peers() {
+        let col = if peers.is_empty() { if st.error.is_some() { p.amber } else { p.muted } } else { p.green };
+        ui.label(RichText::new(&st.state).color(col).size(13.5));
+        for (n, a, t) in &peers {
             ui.label(RichText::new(format!("⇄ {n}  ({a}) · {} 부터", t.format("%H:%M"))).color(p.text).size(12.5));
+        }
+        if peers.is_empty() {
+            if let Some(e) = &st.error {
+                ui.label(RichText::new(e).color(p.faint).size(12.0));
+            }
+            if let Some(h) = &st.hint {
+                ui.label(RichText::new(format!("→ {h}")).color(p.amber).size(12.5));
+            }
         }
         ui.separator();
     }
@@ -1028,12 +1038,52 @@ fn sync_section(ui: &mut Ui, p: &Pal, s: &mut crate::model::SyncSettings) {
                 ui.label(RichText::new(&s.code).font(digits(22.0)).color(p.accent));
             });
             let ip = crate::sync::lan_ip().unwrap_or_else(|| "?".into());
-            ui.label(RichText::new(format!("참여 PC 에 넣을 호스트 주소: {ip}  (또는 컴퓨터 이름 {})  · 포트 {}", crate::sync::pc_name(), s.port)).color(p.faint).size(12.0));
+            ui.label(RichText::new(format!("참여 PC 에서 「주변 Tempo 찾기」로 고르거나 주소 {ip} (컴퓨터 이름 {}) 를 넣으세요", crate::sync::pc_name())).color(p.faint).size(12.0));
+            ui.separator();
+            let (txt, col) = match crate::sync::fw_state() {
+                Fw::Allowed => ("Windows 방화벽: 허용됨".to_string(), p.green),
+                Fw::Blocked => ("Windows 방화벽: 막혀 있음 (예전에 확인 창에서 「취소」) — 「방화벽 허용」을 누르세요".to_string(), p.red),
+                Fw::NoRule => ("Windows 방화벽: 아직 허용 안 함 — 다른 PC 가 처음 연결할 때 확인 창이 뜨면 「허용」, 또는 미리 「방화벽 허용」".to_string(), p.amber),
+                Fw::Checking => ("Windows 방화벽 확인 중…".to_string(), p.muted),
+                Fw::Unknown => ("Windows 방화벽: 확인 못 함".to_string(), p.muted),
+            };
+            row(ui, p, "방화벽", &txt, |ui| {
+                if ghost(ui, p, "다시 확인").clicked() {
+                    crate::sync::fw_check_async();
+                }
+                if primary(ui, p, "방화벽 허용").on_hover_text("관리자 확인 창이 한 번 뜹니다 — 같은 내부망 · Tailscale 에서만 이 Tempo 로 연결 허용").clicked() {
+                    crate::sync::fw_fix(s.port);
+                }
+            });
+            let _ = col;
         }
         SyncMode::Join => {
-            row(ui, p, "호스트 주소", "호스트 PC 의 IP · 컴퓨터 이름 · Tailscale 이름", |ui| {
-                ui.add(egui::TextEdit::singleline(&mut s.host).desired_width(220.0).hint_text("예: 192.168.0.10"));
+            let (finding, found, ago) = crate::sync::found();
+            // 주소가 비어 있으면 처음에 한 번 저절로 찾기
+            if s.host.trim().is_empty() && !finding && ago.map(|a| a > 15).unwrap_or(true) {
+                crate::sync::discover_async(s.port);
+            }
+            row(ui, p, "호스트", "같은 내부망의 Tempo 호스트를 찾아 고르거나 주소를 직접 넣으세요", |ui| {
+                if ghost(ui, p, if finding { "찾는 중…" } else { "주변 Tempo 찾기" }).clicked() {
+                    crate::sync::discover_async(s.port);
+                }
+                ui.add(egui::TextEdit::singleline(&mut s.host).desired_width(200.0).hint_text("IP · 컴퓨터 이름"));
             });
+            if !found.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("찾음:").color(p.muted).size(12.5));
+                    for f in &found {
+                        let sel = s.host.trim() == f.ip;
+                        if ui.selectable_label(sel, format!("{}  ({})", f.name, f.ip)).on_hover_text(format!("Tempo {}", f.ver)).clicked() {
+                            s.host = f.ip.clone();
+                            s.host_pc = f.pc.clone();
+                            s.port = f.port;
+                        }
+                    }
+                });
+            } else if !finding && ago.is_some() {
+                ui.label(RichText::new("주변에서 Tempo 호스트를 못 찾았습니다 — 호스트 PC 가 「호스트」로 켜져 있고 방화벽이 허용됐는지 확인하거나, Tailscale 이면 주소를 직접 넣으세요").color(p.faint).size(12.0));
+            }
             row(ui, p, "연동 코드", "호스트 PC 설정에 보이는 8자리", |ui| {
                 ui.add(egui::TextEdit::singleline(&mut s.code).desired_width(160.0).hint_text("ABCD2345"));
             });

@@ -197,6 +197,8 @@ pub struct Status {
     /// 사람이 읽는 상태
     pub state: String,
     pub error: Option<String>,
+    /// 사람이 할 일 (연결이 안 될 때 원인별)
+    pub hint: Option<String>,
     pub last_rx: Option<chrono::DateTime<chrono::Local>>,
 }
 
@@ -274,6 +276,10 @@ fn sha_hex(b: &[u8]) -> String {
 }
 
 pub fn hmac(key: &[u8], msg: &[u8]) -> String {
+    hmac_raw(key, msg).iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn hmac_raw(key: &[u8], msg: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut k = [0u8; 64];
     if key.len() > 64 {
@@ -288,7 +294,7 @@ pub fn hmac(key: &[u8], msg: &[u8]) -> String {
         opad[i] ^= k[i];
     }
     let inner = Sha256::new().chain_update(ipad).chain_update(msg).finalize();
-    Sha256::new().chain_update(opad).chain_update(inner).finalize().iter().map(|x| format!("{x:02x}")).collect()
+    Sha256::new().chain_update(opad).chain_update(inner).finalize().into()
 }
 
 fn norm_code(c: &str) -> String {
@@ -527,6 +533,11 @@ fn merge_first(core: &Core, host_items: &Map<String, Value>) {
 
 // ── 연결 ───────────────────────────────────────────────────
 
+/// 연동 규약 판 — 다르면 연결 안 함 (1.6.0: 암호화)
+const PROTO: i64 = 2;
+/// 「주변 Tempo 찾기」 UDP 질문
+const DISC_ASK: &[u8] = b"TEMPO-DISCOVER?";
+
 #[derive(Clone, PartialEq)]
 struct Cfg {
     s: SyncSettings,
@@ -551,7 +562,10 @@ fn supervisor(core: Arc<Core>) {
         let cfg = {
             // 잠금은 한 번만 (같은 문장에서 두 번 잡으면 스스로 멈춤)
             let d = core.data();
-            Cfg { s: d.settings.sync.clone(), api_port: d.settings.api_port }
+            let mut s = d.settings.sync.clone();
+            // 호스트 PC 이름표가 바뀐 것만으로는 다시 연결하지 않음
+            s.host_pc.clear();
+            Cfg { s, api_port: d.settings.api_port }
         };
         let changed = running.as_ref().map(|r| r.0 != cfg).unwrap_or(true);
         if changed {
@@ -562,14 +576,16 @@ fn supervisor(core: Arc<Core>) {
                 std::thread::sleep(Duration::from_millis(1500));
             }
             let stop = Arc::new(AtomicBool::new(false));
+            set_status(|s| {
+                s.error = None;
+                s.hint = None;
+            });
             match cfg.s.mode {
-                SyncMode::Off => set_status(|s| {
-                    s.state = "꺼짐".into();
-                    s.error = None;
-                }),
+                SyncMode::Off => set_status(|s| s.state = "꺼짐".into()),
                 SyncMode::Host => {
                     let (c, st, p) = (core.clone(), stop.clone(), cfg.s.clone());
                     std::thread::Builder::new().name("sync-host".into()).spawn(move || host_loop(c, p, st)).ok();
+                    fw_check_async();
                 }
                 SyncMode::Join => {
                     let (c, st, p) = (core.clone(), stop.clone(), cfg.s.clone());
@@ -582,21 +598,24 @@ fn supervisor(core: Arc<Core>) {
     }
 }
 
+fn bind_addr() -> String {
+    // 시험용: TEMPO_SYNC_BIND=127.0.0.1 (방화벽 확인 창 없이)
+    std::env::var("TEMPO_SYNC_BIND").unwrap_or_else(|_| "0.0.0.0".into())
+}
+
 fn host_loop(core: Arc<Core>, s: SyncSettings, stop: Arc<AtomicBool>) {
     if norm_code(&s.code).len() < 6 {
-        set_status(|x| {
-            x.state = "연동 코드가 필요합니다".into();
-            x.error = None;
-        });
+        set_status(|x| x.state = "연동 코드가 필요합니다".into());
         return;
     }
     let l = loop {
-        // 시험용: TEMPO_SYNC_BIND=127.0.0.1 (방화벽 확인 창 없이)
-        let bind = std::env::var("TEMPO_SYNC_BIND").unwrap_or_else(|_| "0.0.0.0".into());
-        match TcpListener::bind((bind.as_str(), s.port)) {
+        match TcpListener::bind((bind_addr().as_str(), s.port)) {
             Ok(l) => break l,
             Err(e) => {
-                set_status(|x| x.error = Some(format!("포트 {} 열기 실패: {e}", s.port)));
+                set_status(|x| {
+                    x.error = Some(format!("포트 {} 열기 실패: {e}", s.port));
+                    x.hint = Some("다른 프로그램(또는 다른 Tempo)이 그 포트를 쓰고 있습니다".into());
+                });
                 for _ in 0..50 {
                     if stop.load(Ordering::Relaxed) {
                         return;
@@ -607,7 +626,12 @@ fn host_loop(core: Arc<Core>, s: SyncSettings, stop: Arc<AtomicBool>) {
         }
     };
     let _ = l.set_nonblocking(true);
-    log(format!("sync: host listening on 0.0.0.0:{}", s.port));
+    log(format!("sync: host listening on {}:{}", bind_addr(), s.port));
+    {
+        let stop = stop.clone();
+        let port = s.port;
+        std::thread::Builder::new().name("sync-find".into()).spawn(move || responder(port, stop)).ok();
+    }
     set_status(|x| {
         x.state = "호스트 — 다른 PC 를 기다리는 중".into();
         x.error = None;
@@ -620,6 +644,12 @@ fn host_loop(core: Arc<Core>, s: SyncSettings, stop: Arc<AtomicBool>) {
                     let _ = st.set_nonblocking(false);
                     if let Err(e) = conn(&c, st, addr.to_string(), &s2, true, &stp) {
                         log(format!("sync: {addr} 연결 끝: {e}"));
+                        if e.contains(ERR_CODE) {
+                            set_status(|x| {
+                                x.error = Some(format!("{addr} 에서 다른 연동 코드로 연결을 시도함"));
+                                x.hint = Some("참여 PC 에 이 PC 의 연동 코드를 그대로 넣었는지 확인하세요".into());
+                            });
+                        }
                     }
                     host_state();
                 });
@@ -635,31 +665,71 @@ fn host_state() {
     set_status(|x| x.state = if n == 0 { "호스트 — 다른 PC 를 기다리는 중".into() } else { format!("호스트 — {n}대 연결됨") });
 }
 
+// 오류 종류 (안내 문구 고르기)
+const ERR_UNREACH: &str = "응답 없음";
+const ERR_REFUSED: &str = "연결 거부";
+const ERR_NOADDR: &str = "주소를 찾을 수 없음";
+const ERR_CODE: &str = "연동 코드가 다릅니다";
+const ERR_VER: &str = "Tempo 버전이 다릅니다";
+
+fn hint_for(e: &str) -> Option<String> {
+    Some(
+        if e.contains(ERR_UNREACH) {
+            "호스트 PC 가 꺼져 있거나, 다른 네트워크에 있거나, 호스트 PC 방화벽이 막고 있습니다 — 호스트 PC 의 설정 → PC 연동 → 「방화벽 허용」을 눌러 보세요"
+        } else if e.contains(ERR_REFUSED) {
+            "호스트 PC 는 켜져 있지만 Tempo 연동이 꺼져 있습니다 — 호스트 PC 설정 → PC 연동 → 「호스트」"
+        } else if e.contains(ERR_NOADDR) {
+            "컴퓨터 이름 대신 IP 를 넣거나 「주변 Tempo 찾기」를 눌러 보세요"
+        } else if e.contains(ERR_CODE) {
+            "호스트 PC 설정에 보이는 8자리 연동 코드를 그대로 넣으세요"
+        } else if e.contains(ERR_VER) {
+            "두 PC 의 Tempo 를 최신으로 업데이트하세요 (설정 → 업데이트 → 지금 확인)"
+        } else {
+            return None;
+        }
+        .to_string(),
+    )
+}
+
 fn join_loop(core: Arc<Core>, s: SyncSettings, stop: Arc<AtomicBool>) {
     let host = s.host.trim().to_string();
     if host.is_empty() || norm_code(&s.code).len() < 6 {
-        set_status(|x| {
-            x.state = "호스트 주소와 연동 코드를 넣어 주세요".into();
-            x.error = None;
-        });
+        set_status(|x| x.state = "호스트 주소와 연동 코드를 넣어 주세요 (「주변 Tempo 찾기」로 고를 수 있음)".into());
         return;
     }
     let target = if host.contains(':') { host.clone() } else { format!("{host}:{}", s.port) };
+    let mut fails = 0u32;
     while !stop.load(Ordering::Relaxed) {
         set_status(|x| x.state = format!("{target} 에 연결 중…"));
         let addr = target.to_socket_addrs().ok().and_then(|mut a| a.next());
         let r = match addr {
-            None => Err(format!("{target} 주소를 찾을 수 없음")),
+            None => Err(format!("{ERR_NOADDR}: {target}")),
             Some(a) => match TcpStream::connect_timeout(&a, Duration::from_secs(4)) {
                 Ok(st) => conn(&core, st, target.clone(), &s, false, &stop),
-                Err(e) => Err(format!("연결 안 됨: {e}")),
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => Err(format!("{ERR_REFUSED} ({target})")),
+                Err(e) => Err(format!("{ERR_UNREACH} ({target}): {e}")),
             },
         };
         if let Err(e) = r {
+            fails += 1;
             set_status(|x| {
+                x.hint = hint_for(&e);
                 x.error = Some(e.clone());
                 x.state = "연결 끊김 — 5초 뒤 다시 시도".into();
             });
+            // 호스트 IP 가 바뀌었을 수 있음 → 같은 호스트 PC 를 찾아 새 주소로 (2번째 실패부터, 6번에 한 번)
+            let unreachable = e.contains(ERR_UNREACH) || e.contains(ERR_REFUSED) || e.contains(ERR_NOADDR);
+            let host_pc = core.data().settings.sync.host_pc.clone();
+            if unreachable && !host_pc.is_empty() && fails % 6 == 2 {
+                if let Some(f) = discover(s.port, 1500).into_iter().find(|f| f.pc == host_pc) {
+                    let now_host = host.split(':').next().unwrap_or("").to_string();
+                    if f.ip != now_host {
+                        log(format!("sync: host moved {now_host} -> {} — following", f.ip));
+                        core.update_quiet(|d| d.settings.sync.host = f.ip.clone());
+                        return; // 설정이 바뀌어 감시 스레드가 새로 연결
+                    }
+                }
+            }
         }
         for _ in 0..25 {
             if stop.load(Ordering::Relaxed) {
@@ -669,6 +739,260 @@ fn join_loop(core: Arc<Core>, s: SyncSettings, stop: Arc<AtomicBool>) {
         }
     }
 }
+
+// ── 주변 Tempo 찾기 (UDP, 포트 + 1) ─────────────────────────
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Found {
+    pub pc: String,
+    pub name: String,
+    pub ip: String,
+    pub port: u16,
+    pub ver: String,
+}
+
+fn responder(port: u16, stop: Arc<AtomicBool>) {
+    let sock = match std::net::UdpSocket::bind((bind_addr().as_str(), port + 1)) {
+        Ok(s) => s,
+        Err(e) => {
+            log(format!("sync: 찾기 응답 포트 {} 열기 실패: {e}", port + 1));
+            return;
+        }
+    };
+    let _ = sock.set_read_timeout(Some(Duration::from_millis(500)));
+    let me = with_store(|x| x.pc_id.clone());
+    let mut buf = [0u8; 512];
+    while !stop.load(Ordering::Relaxed) {
+        if let Ok((n, from)) = sock.recv_from(&mut buf) {
+            if buf[..n].starts_with(DISC_ASK) {
+                let r = json!({ "tempo": PROTO, "pc": me, "name": pc_name(), "port": port, "ver": crate::update::CURRENT }).to_string();
+                let _ = sock.send_to(r.as_bytes(), from);
+            }
+        }
+    }
+}
+
+/// 같은 내부망의 Tempo 호스트들 (wait_ms 동안 대답 모음)
+pub fn discover(port: u16, wait_ms: u64) -> Vec<Found> {
+    let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") else { return vec![] };
+    let _ = sock.set_broadcast(true);
+    let _ = sock.set_read_timeout(Some(Duration::from_millis(200)));
+    let q = port + 1;
+    let mut targets = vec![format!("255.255.255.255:{q}"), format!("127.0.0.1:{q}")];
+    if let Some(ip) = lan_ip() {
+        if let Some((a, _)) = ip.rsplit_once('.') {
+            targets.push(format!("{a}.255:{q}"));
+        }
+    }
+    for t in &targets {
+        let _ = sock.send_to(DISC_ASK, t.as_str());
+    }
+    let me = with_store(|x| x.pc_id.clone());
+    let t0 = Instant::now();
+    let mut out: Vec<Found> = Vec::new();
+    let mut buf = [0u8; 1024];
+    while t0.elapsed() < Duration::from_millis(wait_ms) {
+        if let Ok((n, from)) = sock.recv_from(&mut buf) {
+            let Ok(v) = serde_json::from_slice::<Value>(&buf[..n]) else { continue };
+            let pc = v["pc"].as_str().unwrap_or("").to_string();
+            if pc.is_empty() || pc == me || out.iter().any(|f| f.pc == pc) {
+                continue;
+            }
+            out.push(Found {
+                pc,
+                name: v["name"].as_str().unwrap_or("?").to_string(),
+                ip: from.ip().to_string(),
+                port: v["port"].as_u64().unwrap_or(port as u64) as u16,
+                ver: v["ver"].as_str().unwrap_or("").to_string(),
+            });
+        }
+    }
+    out
+}
+
+static FOUND: Mutex<Option<(Instant, Vec<Found>)>> = Mutex::new(None);
+static FINDING: AtomicBool = AtomicBool::new(false);
+
+/// 「주변 Tempo 찾기」 — 뒤에서 1.5초
+pub fn discover_async(port: u16) {
+    if FINDING.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let r = discover(port, 1500);
+        *FOUND.lock().unwrap() = Some((Instant::now(), r));
+        FINDING.store(false, Ordering::Relaxed);
+    });
+}
+
+/// (찾는 중, 찾은 목록, 몇 초 전)
+pub fn found() -> (bool, Vec<Found>, Option<u64>) {
+    let g = FOUND.lock().unwrap();
+    (FINDING.load(Ordering::Relaxed), g.as_ref().map(|x| x.1.clone()).unwrap_or_default(), g.as_ref().map(|x| x.0.elapsed().as_secs()))
+}
+
+// ── 방화벽 (호스트) ─────────────────────────────────────────
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Fw {
+    Unknown,
+    Checking,
+    /// 이 exe 를 허용하는 규칙 있음
+    Allowed,
+    /// 차단 규칙 있음 (Windows 확인 창에서 취소)
+    Blocked,
+    /// 규칙 없음 — 처음 연결 때 Windows 가 물어봄
+    NoRule,
+}
+
+static FW: Mutex<Option<(Instant, Fw)>> = Mutex::new(None);
+
+fn hidden(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x0800_0000)
+}
+
+pub fn fw_state() -> Fw {
+    FW.lock().unwrap().as_ref().map(|x| x.1.clone()).unwrap_or(Fw::Unknown)
+}
+
+/// 방화벽 규칙 확인 (관리자 권한 없이 읽기만, 뒤에서)
+pub fn fw_check_async() {
+    {
+        let mut g = FW.lock().unwrap();
+        if matches!(g.as_ref(), Some((_, Fw::Checking))) {
+            return;
+        }
+        *g = Some((Instant::now(), Fw::Checking));
+    }
+    std::thread::spawn(|| {
+        let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default().replace('\'', "''");
+        let script = format!(
+            "$r = Get-NetFirewallApplicationFilter -Program '{exe}' -ErrorAction SilentlyContinue | Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object {{ $_.Enabled -eq 'True' -and $_.Direction -eq 'Inbound' }}; \
+             'ALLOW=' + @($r | Where-Object {{ $_.Action -eq 'Allow' }}).Count + ';BLOCK=' + @($r | Where-Object {{ $_.Action -eq 'Block' }}).Count"
+        );
+        let out = hidden(std::process::Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script])).output();
+        let st = match out {
+            Ok(o) => {
+                let t = String::from_utf8_lossy(&o.stdout).to_string();
+                let num = |k: &str| t.split(';').find_map(|p| p.trim().strip_prefix(k)).and_then(|v| v.trim().parse::<u32>().ok());
+                match (num("ALLOW="), num("BLOCK=")) {
+                    (_, Some(b)) if b > 0 => Fw::Blocked,
+                    (Some(a), _) if a > 0 => Fw::Allowed,
+                    (Some(_), Some(_)) => Fw::NoRule,
+                    _ => Fw::Unknown,
+                }
+            }
+            Err(_) => Fw::Unknown,
+        };
+        log(format!("sync: firewall check = {st:?}"));
+        *FW.lock().unwrap() = Some((Instant::now(), st));
+    });
+}
+
+fn b64(data: &[u8]) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut s = String::new();
+    for c in data.chunks(3) {
+        let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        for i in 0..4 {
+            if i <= c.len() {
+                s.push(T[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                s.push('=');
+            }
+        }
+    }
+    s
+}
+
+/// 「방화벽 허용」 — 관리자 확인 창 한 번. 이 exe 의 차단 규칙을 지우고 TCP(연동) · UDP(찾기) 허용 (같은 내부망 · Tailscale 만)
+pub fn fw_fix(port: u16) {
+    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default().replace('\'', "''");
+    let script = format!(
+        "$exe = '{exe}'\n\
+         Get-NetFirewallApplicationFilter -Program $exe -ErrorAction SilentlyContinue | Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object {{ $_.Direction -eq 'Inbound' -and $_.Action -eq 'Block' }} | Remove-NetFirewallRule\n\
+         Get-NetFirewallRule -DisplayName 'Tempo PC 연동*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule\n\
+         New-NetFirewallRule -DisplayName 'Tempo PC 연동' -Direction Inbound -Action Allow -Program $exe -Protocol TCP -LocalPort {port} -RemoteAddress LocalSubnet,100.64.0.0/10 -Profile Any | Out-Null\n\
+         New-NetFirewallRule -DisplayName 'Tempo PC 연동 (찾기)' -Direction Inbound -Action Allow -Program $exe -Protocol UDP -LocalPort {} -RemoteAddress LocalSubnet,100.64.0.0/10 -Profile Any | Out-Null\n",
+        port + 1
+    );
+    let utf16: Vec<u8> = script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    let enc = b64(&utf16);
+    let outer = format!("Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList '-NoProfile','-EncodedCommand','{enc}'");
+    std::thread::spawn(move || {
+        log("sync: firewall fix requested (UAC)");
+        let r = hidden(std::process::Command::new("powershell").args(["-NoProfile", "-Command", &outer])).status();
+        log(format!("sync: firewall fix done: {r:?}"));
+        fw_check_async();
+    });
+}
+
+// ── 암호화 (ChaCha20-Poly1305, 연동 코드에서 방향별 키) ─────
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()
+}
+
+struct Seal {
+    aead: chacha20poly1305::ChaCha20Poly1305,
+    dir: u8,
+    ctr: u64,
+}
+
+impl Seal {
+    fn new(key: [u8; 32], dir: u8) -> Self {
+        use chacha20poly1305::KeyInit;
+        Seal { aead: chacha20poly1305::ChaCha20Poly1305::new(&key.into()), dir, ctr: 0 }
+    }
+
+    fn seal(&mut self, plain: &str) -> String {
+        use chacha20poly1305::aead::Aead;
+        let mut n = [0u8; 12];
+        n[0] = self.dir;
+        n[4..].copy_from_slice(&self.ctr.to_le_bytes());
+        self.ctr += 1;
+        let ct = self.aead.encrypt(&n.into(), plain.as_bytes()).unwrap_or_default();
+        let mut v = n.to_vec();
+        v.extend(ct);
+        format!("E{}", hex(&v))
+    }
+
+    /// 열기 — 위조 · 순서 뒤바뀜(다시 보내기)이면 None
+    fn open(&mut self, line: &str) -> Option<String> {
+        use chacha20poly1305::aead::Aead;
+        let b = unhex(line.strip_prefix('E')?)?;
+        if b.len() < 12 + 16 {
+            return None;
+        }
+        let (n, ct) = b.split_at(12);
+        if n[0] != self.dir {
+            return None;
+        }
+        let c = u64::from_le_bytes(n[4..12].try_into().ok()?);
+        if c < self.ctr {
+            return None;
+        }
+        let nonce: [u8; 12] = n.try_into().ok()?;
+        let p = self.aead.decrypt(&nonce.into(), ct).ok()?;
+        self.ctr = c + 1;
+        String::from_utf8(p).ok()
+    }
+}
+
+fn session_key(code: &str, label: &str, nh: &str, nc: &str) -> [u8; 32] {
+    hmac_raw(code.as_bytes(), format!("tempo-sync-v{PROTO}|{label}|{nh}|{nc}").as_bytes())
+}
+
+// ── 한 연결 ────────────────────────────────────────────────
 
 fn send_line(w: &mut TcpStream, s: &str) -> std::io::Result<()> {
     w.write_all(s.as_bytes())?;
@@ -701,7 +1025,7 @@ fn read_json(r: &mut BufReader<TcpStream>, buf: &mut String, secs: u64) -> Resul
             return serde_json::from_str(&l).map_err(|e| format!("메시지 이상: {e}"));
         }
         if t0.elapsed() > Duration::from_secs(secs) {
-            return Err("응답 없음".into());
+            return Err("응답 없음 (인사)".into());
         }
     }
 }
@@ -715,35 +1039,54 @@ fn conn(core: &Core, st: TcpStream, addr: String, s: &SyncSettings, host: bool, 
     let code = norm_code(&s.code);
     let my_pc = with_store(|x| x.pc_id.clone());
     let nonce = sha_hex(format!("{}{:?}", crate::model::new_id(), Instant::now()).as_bytes());
-    // 인사 · 확인
-    let (peer_pc, peer_name) = if host {
-        send_line(&mut w, &json!({ "t": "hi", "pc": my_pc, "name": pc_name(), "nonce": nonce, "ver": crate::update::CURRENT }).to_string()).map_err(|e| e.to_string())?;
+    // 인사 · 서로 확인 (평문 — 연동 코드 자체는 보내지 않음)
+    let (peer_pc, peer_name, nh, nc) = if host {
+        send_line(&mut w, &json!({ "t": "hi", "pc": my_pc, "name": pc_name(), "nonce": nonce, "ver": crate::update::CURRENT, "proto": PROTO }).to_string()).map_err(|e| e.to_string())?;
         let a = read_json(&mut r, &mut buf, 10)?;
-        if a["t"] != "auth" || a["mac"].as_str() != Some(hmac(code.as_bytes(), nonce.as_bytes()).as_str()) {
-            let _ = send_line(&mut w, &json!({ "t": "no", "why": "연동 코드가 다릅니다" }).to_string());
-            return Err("연동 코드가 다른 PC 가 연결을 시도함".into());
+        if a["proto"].as_i64() != Some(PROTO) {
+            let _ = send_line(&mut w, &json!({ "t": "no", "why": ERR_VER }).to_string());
+            return Err(format!("{ERR_VER} (상대 {})", a["ver"].as_str().unwrap_or("옛 버전")));
         }
-        let n2 = a["nonce"].as_str().unwrap_or("");
+        if a["t"] != "auth" || a["mac"].as_str() != Some(hmac(code.as_bytes(), nonce.as_bytes()).as_str()) {
+            let _ = send_line(&mut w, &json!({ "t": "no", "why": ERR_CODE }).to_string());
+            return Err(ERR_CODE.into());
+        }
+        let n2 = a["nonce"].as_str().unwrap_or("").to_string();
         send_line(&mut w, &json!({ "t": "ok", "mac": hmac(code.as_bytes(), n2.as_bytes()) }).to_string()).map_err(|e| e.to_string())?;
-        (a["pc"].as_str().unwrap_or("").to_string(), a["name"].as_str().unwrap_or("?").to_string())
+        (a["pc"].as_str().unwrap_or("").to_string(), a["name"].as_str().unwrap_or("?").to_string(), nonce.clone(), n2)
     } else {
         let h = read_json(&mut r, &mut buf, 10)?;
         if h["t"] != "hi" {
             return Err("Tempo 호스트가 아님".into());
         }
-        let hn = h["nonce"].as_str().unwrap_or("");
-        send_line(&mut w, &json!({ "t": "auth", "pc": my_pc, "name": pc_name(), "mac": hmac(code.as_bytes(), hn.as_bytes()), "nonce": nonce }).to_string()).map_err(|e| e.to_string())?;
+        if h["proto"].as_i64() != Some(PROTO) {
+            return Err(format!("{ERR_VER} (호스트 {})", h["ver"].as_str().unwrap_or("옛 버전")));
+        }
+        let hn = h["nonce"].as_str().unwrap_or("").to_string();
+        send_line(&mut w, &json!({ "t": "auth", "pc": my_pc, "name": pc_name(), "mac": hmac(code.as_bytes(), hn.as_bytes()), "nonce": nonce, "ver": crate::update::CURRENT, "proto": PROTO }).to_string())
+            .map_err(|e| e.to_string())?;
         let ok = read_json(&mut r, &mut buf, 10)?;
         if ok["t"] != "ok" {
             return Err(ok["why"].as_str().unwrap_or("호스트가 거절함").to_string());
         }
         if ok["mac"].as_str() != Some(hmac(code.as_bytes(), nonce.as_bytes()).as_str()) {
-            return Err("호스트의 연동 코드가 다름".into());
+            return Err(format!("{ERR_CODE} (호스트 쪽)"));
         }
-        (h["pc"].as_str().unwrap_or("").to_string(), h["name"].as_str().unwrap_or("?").to_string())
+        (h["pc"].as_str().unwrap_or("").to_string(), h["name"].as_str().unwrap_or("?").to_string(), hn, nonce.clone())
     };
     if peer_pc == my_pc {
         return Err("자기 자신에게 연결함".into());
+    }
+    // 이제부터 암호화 — 방향마다 다른 키
+    let (mut tx_seal, mut rx_seal) = if host {
+        (Seal::new(session_key(&code, "h2c", &nh, &nc), 1), Seal::new(session_key(&code, "c2h", &nh, &nc), 2))
+    } else {
+        (Seal::new(session_key(&code, "c2h", &nh, &nc), 2), Seal::new(session_key(&code, "h2c", &nh, &nc), 1))
+    };
+    if !host && core.data().settings.sync.host_pc != peer_pc {
+        // 호스트 PC 를 기억 (IP 가 바뀌어도 찾아가게)
+        let p = peer_pc.clone();
+        core.update_quiet(|d| d.settings.sync.host_pc = p);
     }
     // 보내는 스레드
     let (tx, rx) = mpsc::channel::<String>();
@@ -754,7 +1097,7 @@ fn conn(core: &Core, st: TcpStream, addr: String, s: &SyncSettings, host: bool, 
         let mut w2 = w.try_clone().map_err(|e| e.to_string())?;
         std::thread::spawn(move || {
             while let Ok(m) = rx.recv() {
-                if send_line(&mut w2, &m).is_err() {
+                if send_line(&mut w2, &tx_seal.seal(&m)).is_err() {
                     break;
                 }
             }
@@ -762,7 +1105,7 @@ fn conn(core: &Core, st: TcpStream, addr: String, s: &SyncSettings, host: bool, 
             let _ = w2.shutdown(std::net::Shutdown::Both);
         });
     }
-    log(format!("sync: connected {} {peer_name} ({addr})", if host { "from" } else { "to" }));
+    log(format!("sync: connected {} {peer_name} ({addr}, encrypted)", if host { "from" } else { "to" }));
     // 호스트는 바로 전체를 보냄. 참여는 호스트 전체를 먼저 받고(처음이면 합치기) 자기 전체를 보냄
     if host {
         let _ = tx.send(items_msg(&full_list(core), true));
@@ -770,10 +1113,15 @@ fn conn(core: &Core, st: TcpStream, addr: String, s: &SyncSettings, host: bool, 
     PEERS.lock().unwrap().push(Peer { cid, name: peer_name.clone(), addr: addr.clone(), tx: tx.clone(), since: chrono::Local::now() });
     if host {
         host_state();
+        set_status(|x| {
+            x.error = None;
+            x.hint = None;
+        });
     } else {
         set_status(|x| {
             x.state = format!("연결됨 — {peer_name}");
             x.error = None;
+            x.hint = None;
         });
     }
     let mut got_full = host;
@@ -796,10 +1144,13 @@ fn conn(core: &Core, st: TcpStream, addr: String, s: &SyncSettings, host: bool, 
         if last_rx.elapsed() > Duration::from_secs(45) {
             break Err("45초 동안 응답 없음".to_string());
         }
-        let line = match read_line(&mut r, &mut buf) {
+        let raw = match read_line(&mut r, &mut buf) {
             Ok(Some(l)) => l,
             Ok(None) => continue,
             Err(e) => break Err(e.to_string()),
+        };
+        let Some(line) = rx_seal.open(&raw) else {
+            break Err("암호 해제 실패 — 위조되었거나 연동 코드가 다름".to_string());
         };
         last_rx = Instant::now();
         let Ok(m) = serde_json::from_str::<Value>(&line) else { continue };
@@ -856,16 +1207,23 @@ fn conn(core: &Core, st: TcpStream, addr: String, s: &SyncSettings, host: bool, 
 pub fn status_json(core: &Core) -> Value {
     let st = status();
     let s = core.data().settings.sync.clone();
+    let (finding, found, ago) = found();
     json!({
         "mode": format!("{:?}", s.mode).to_lowercase(),
         "state": st.state,
         "error": st.error,
+        "hint": st.hint,
         "host": s.host,
+        "host_pc": s.host_pc,
         "port": s.port,
         "pc": pc_name(),
         "lan_ip": lan_ip(),
         "remote_sound": s.remote_sound,
+        "firewall": format!("{:?}", fw_state()).to_lowercase(),
         "peers": peers().into_iter().map(|(n, a, t)| json!({ "name": n, "addr": a, "since": t.to_rfc3339() })).collect::<Vec<_>>(),
+        "found": found.into_iter().map(|f| json!({ "pc": f.pc, "name": f.name, "ip": f.ip, "port": f.port, "ver": f.ver })).collect::<Vec<_>>(),
+        "finding": finding,
+        "found_ago": ago,
         "last_rx": st.last_rx.map(|t| t.to_rfc3339()),
         "items": with_store(|x| x.revs.len()),
     })
@@ -914,4 +1272,36 @@ mod tests {
         assert_eq!(natural_key("t", &v), Some("\"추나\"".into()));
         assert!(natural_key("o", &v).is_none());
     }
+
+    #[test]
+    fn seal_roundtrip_tamper_replay() {
+        let k = session_key("ABCD2345", "h2c", "n1", "n2");
+        let mut a = Seal::new(k, 1);
+        let mut b = Seal::new(k, 1);
+        let m1 = a.seal("{\"t\":\"ping\"}");
+        let m2 = a.seal("두 번째");
+        assert!(m1.starts_with('E') && !m1.contains("ping"));
+        assert_eq!(b.open(&m1).as_deref(), Some("{\"t\":\"ping\"}"));
+        assert_eq!(b.open(&m2).as_deref(), Some("두 번째"));
+        // 다시 보내기 · 위조 · 다른 코드 · 다른 방향
+        assert!(b.open(&m1).is_none());
+        let mut bad = a.seal("x");
+        bad.replace_range(30..32, if &bad[30..32] == "00" { "11" } else { "00" });
+        assert!(b.open(&bad).is_none());
+        let mut other = Seal::new(session_key("WRONG234", "h2c", "n1", "n2"), 1);
+        assert!(other.open(&a.seal("y")).is_none());
+        let mut rev = Seal::new(k, 2);
+        assert!(rev.open(&a.seal("z")).is_none());
+    }
+
+    #[test]
+    fn b64_and_hints() {
+        assert_eq!(b64(b"Man"), "TWFu");
+        assert_eq!(b64(b"Ma"), "TWE=");
+        assert_eq!(b64(b"M"), "TQ==");
+        assert!(hint_for(&format!("{ERR_UNREACH} (x)")).unwrap().contains("방화벽"));
+        assert!(hint_for(ERR_CODE).is_some());
+        assert!(hint_for("뭔가 다른 오류").is_none());
+    }
+
 }

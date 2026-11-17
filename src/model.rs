@@ -314,6 +314,9 @@ pub struct SyncSettings {
     /// 참여: 호스트 주소 (IP · 컴퓨터 이름 · Tailscale 이름)
     #[serde(default)]
     pub host: String,
+    /// 참여: 연결했던 호스트 PC 의 고유 번호 (IP 가 바뀌면 찾아서 따라감)
+    #[serde(default)]
+    pub host_pc: String,
     #[serde(default = "sync_port")]
     pub port: u16,
     /// 다른 PC 에서 시작한 타이머의 소리도 이 PC 에서 냄
@@ -327,7 +330,7 @@ fn sync_port() -> u16 {
 
 impl Default for SyncSettings {
     fn default() -> Self {
-        SyncSettings { mode: SyncMode::Off, code: String::new(), host: String::new(), port: sync_port(), remote_sound: false }
+        SyncSettings { mode: SyncMode::Off, code: String::new(), host: String::new(), host_pc: String::new(), port: sync_port(), remote_sound: false }
     }
 }
 
