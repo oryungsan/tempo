@@ -157,6 +157,12 @@ pub struct BedInfo {
     pub patient: String,
     #[serde(default)]
     pub program: String,
+    /// 베드에 들어온 시각 "HH:MM" (EMR 연결 등)
+    #[serde(default)]
+    pub since: String,
+    /// 접수 메모 (예: 허리 약침 사혈)
+    #[serde(default)]
+    pub note: String,
 }
 
 /// 치료 프로그램 (베드에서 고르는 것) — 단계 여러 개 가능 (예: 핫팩 10분 → 침 15분)

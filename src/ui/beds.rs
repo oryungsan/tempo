@@ -34,7 +34,7 @@ fn hms(d: Duration) -> String {
 
 /// 요약 — (전체, 치료 중, 끝남)
 pub fn counts(list: &[(TimerDef, TimerView)]) -> (usize, usize, usize) {
-    let busy = list.iter().filter(|(_, v)| v.phase.active()).count();
+    let busy = list.iter().filter(|(t, v)| v.phase.active() || (v.phase == Phase::Idle && t.bed.as_ref().map(|b| !b.patient.is_empty()).unwrap_or(false))).count();
     let done = list.iter().filter(|(_, v)| v.phase == Phase::Done).count();
     (list.len(), busy, done)
 }
@@ -56,6 +56,27 @@ pub fn tile(ui: &mut Ui, core: &Core, p: &Pal, def: &TimerDef, v: &TimerView, re
     let (l, t, r, btm) = (rect.left() + 16.0 * k, rect.top() + 12.0 * k, rect.right() - 16.0 * k, rect.bottom() - 12.0 * k);
     let w = r - l;
     match v.phase {
+        Phase::Idle if !b.patient.is_empty() => {
+            // 환자는 들어왔고 치료 시작 전 (EMR 연결)
+            pt.rect_filled(rect, cr(rad), lerp(p.card, p.amber, if p.dark { 0.10 } else { 0.08 }));
+            pt.rect_stroke(rect, cr(rad), Stroke::new(1.5 * k, p.amber.gamma_multiply(if resp.hovered() { 1.0 } else { 0.7 })), egui::StrokeKind::Inside);
+            pt.text(Pos2::new(l, t), Align2::LEFT_TOP, &def.name, bold(17.0 * k), p.text);
+            pt.text(Pos2::new(r, t + 2.0 * k), Align2::RIGHT_TOP, "치료 전", FontId::proportional(12.5 * k), p.amber);
+            pt.galley(Pos2::new(l, t + 26.0 * k), trunc(ui, &b.patient, bold(20.0 * k), p.text, w), p.text);
+            if !b.note.is_empty() {
+                pt.galley(Pos2::new(l, t + 54.0 * k), trunc(ui, &b.note, FontId::proportional(13.0 * k), p.muted, w), p.muted);
+            }
+            let wait = chrono::NaiveTime::parse_from_str(&b.since, "%H:%M")
+                .ok()
+                .map(|s| (chrono::Local::now().time() - s).num_minutes())
+                .filter(|m| *m >= 0)
+                .map(|m| format!("입실 {} · {m}분째", b.since))
+                .unwrap_or_default();
+            if !wait.is_empty() {
+                pt.text(Pos2::new(l, btm), Align2::LEFT_BOTTOM, wait, FontId::proportional(14.0 * k), p.amber);
+            }
+            pt.text(Pos2::new(r, btm), Align2::RIGHT_BOTTOM, "눌러서 시작", FontId::proportional(12.0 * k), p.faint);
+        }
         Phase::Idle => {
             pt.rect_filled(rect, cr(rad), p.card);
             pt.rect_stroke(rect, cr(rad), Stroke::new(1.0_f32, if resp.hovered() { p.faint } else { p.border }), egui::StrokeKind::Inside);
@@ -102,7 +123,10 @@ pub fn tile(ui: &mut Ui, core: &Core, p: &Pal, def: &TimerDef, v: &TimerView, re
                 pt.galley(Pos2::new(l, y), trunc(ui, &b.patient, bold(20.0 * k), p.text, w), p.text);
                 y += 28.0 * k;
             }
-            let step = if v.n > 1 { format!("{} · {}/{} {}", b.program, v.idx + 1, v.n, v.step_name) } else { b.program.clone() };
+            let mut step = if v.n > 1 { format!("{} · {}/{} {}", b.program, v.idx + 1, v.n, v.step_name) } else { b.program.clone() };
+            if !b.note.is_empty() {
+                step = format!("{step} · {}", b.note);
+            }
             pt.galley(Pos2::new(l, y), trunc(ui, &step, FontId::proportional(13.0 * k), p.muted, w), p.muted);
             // 남은 시간 = 이 단계 (여러 단계면 오른쪽에 전체)
             let rem = if v.n > 1 { v.step_rem } else { v.total_rem };
@@ -365,6 +389,23 @@ impl BedAction {
                         ui.add_space(12.0);
                         ui.label(RichText::new("다른 치료로 시작").color(p.muted).size(12.5));
                     } else {
+                        if !b.patient.is_empty() {
+                            ui.horizontal(|ui| {
+                                let mut info = String::new();
+                                if !b.since.is_empty() {
+                                    info += &format!("입실 {}", b.since);
+                                }
+                                if !b.note.is_empty() {
+                                    info += &format!("  ·  {}", b.note);
+                                }
+                                ui.label(RichText::new(info).color(p.amber).size(13.0));
+                                if ghost(ui, p, "비우기").clicked() {
+                                    core.bed_clear(id, "bed");
+                                    out = Outcome::Close;
+                                }
+                            });
+                            ui.add_space(6.0);
+                        }
                         ui.label(RichText::new("치료 프로그램을 누르면 바로 시작").color(p.muted).size(12.5));
                     }
                     ui.add_space(4.0);
@@ -613,6 +654,8 @@ pub fn beds_json(core: &Core) -> serde_json::Value {
                     "phase": v.phase.as_str(),
                     "patient": b.patient,
                     "program": b.program,
+                    "since": b.since,
+                    "note": b.note,
                     "step": if v.phase.active() { v.idx + 1 } else { 0 },
                     "step_count": v.n,
                     "step_name": v.step_name,

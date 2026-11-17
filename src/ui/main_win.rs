@@ -186,7 +186,8 @@ fn sidebar(ctx: &egui::Context, core: &Arc<Core>, st: &mut MainState, p: &Pal, v
             ui.add_space(22.0);
             let bed_ids: Vec<Id> = core.data().timers.iter().filter(|t| t.bed.is_some()).map(|t| t.id).collect();
             let running = views.iter().filter(|v| v.phase.active() && !bed_ids.contains(&v.id)).count();
-            let bed_busy = views.iter().filter(|v| (v.phase.active() || v.phase == Phase::Done) && bed_ids.contains(&v.id)).count();
+            let bed_waiting: Vec<Id> = core.data().timers.iter().filter(|t| t.bed.as_ref().map(|b| !b.patient.is_empty()).unwrap_or(false)).map(|t| t.id).collect();
+            let bed_busy = views.iter().filter(|v| bed_ids.contains(&v.id) && (v.phase.active() || v.phase == Phase::Done || bed_waiting.contains(&v.id))).count();
             let alarms_on = core.data().alarms.iter().filter(|a| a.enabled).count();
             let sw_on = st.sw.running();
             for (page, icon, label, badge) in [

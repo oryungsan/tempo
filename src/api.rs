@@ -8,6 +8,7 @@
 //!     GET /api/world · /api/countdowns · /api/ddays   월드타임 · 카운트다운 · 디데이
 //!     GET /api/update[?do=check|apply]       자동 업데이트 상태 · 지금 확인 · 지금 업데이트
 //!     GET /api/beds · /api/bed?no=3&do=start&preset=침 15분&patient=…   치료실 베드 (do=start|clear|extend|pause|resume|toggle|skip, min=)
+//!         do=patient&patient=&since=HH:MM&note=  환자 들어옴(시작 안 함) · do=vacate&patient=  나감(끝났거나 시작 전이면 비움)
 //!     GET /api/sync[?mode=host|join|off&code=&host=&sound=on|off&find=1]   PC 연동 상태 · 설정 · 주변 찾기
 use crate::core::Core;
 use crate::engine::Cmd;
@@ -233,6 +234,15 @@ fn run(core: Arc<Core>) {
                         }
                     }
                     (Some(id), Some("clear")) => core.bed_clear(id, "api"),
+                    // EMR 연결: 환자가 들어옴(시작 안 함) · 나감(끝났거나 시작 안 한 베드만 비움)
+                    (Some(id), Some("patient")) => {
+                        let r = core.bed_set_patient(id, &get("patient").unwrap_or_default(), &get("since").unwrap_or_default(), &get("note").unwrap_or_default(), "api");
+                        crate::store::log(format!("bed api patient: {r}"));
+                    }
+                    (Some(id), Some("vacate")) => {
+                        let r = core.bed_vacate(id, &get("patient").unwrap_or_default(), "api");
+                        crate::store::log(format!("bed api vacate: {r}"));
+                    }
                     (Some(id), Some("extend")) => core.bed_extend(id, get("min").and_then(|m| m.parse().ok()).unwrap_or(5), "api"),
                     (Some(id), Some(d)) => {
                         if let Some(c) = Cmd::parse(d) {

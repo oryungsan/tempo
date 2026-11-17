@@ -490,8 +490,80 @@ impl Core {
             if let Some(b) = d.timers.iter_mut().find(|t| t.id == id).and_then(|t| t.bed.as_mut()) {
                 b.patient.clear();
                 b.program.clear();
+                b.since.clear();
+                b.note.clear();
             }
         });
+    }
+
+    fn bed_info(&self, id: Id) -> Option<crate::model::BedInfo> {
+        self.data().timers.iter().find(|t| t.id == id).and_then(|t| t.bed.clone())
+    }
+
+    /// 환자가 베드에 들어옴 (EMR 연결) — 시작은 안 함. 반환 = 한 일
+    pub fn bed_set_patient(&self, id: Id, name: &str, since: &str, note: &str, src: &str) -> &'static str {
+        let (Some(v), Some(b)) = (self.view(id), self.bed_info(id)) else { return "no bed" };
+        let name = name.trim().to_string();
+        let set = |me: &Self| {
+            let (n, s, t) = (name.clone(), since.to_string(), note.to_string());
+            me.update(|d| {
+                if let Some(bb) = d.timers.iter_mut().find(|t| t.id == id).and_then(|t| t.bed.as_mut()) {
+                    bb.patient = n;
+                    bb.since = s;
+                    bb.note = t;
+                }
+            });
+        };
+        match v.phase {
+            Phase::Running | Phase::Paused => {
+                if b.patient.is_empty() || b.patient == name {
+                    set(self);
+                    "updated"
+                } else {
+                    "busy" // 다른 환자 치료 중 — 그대로
+                }
+            }
+            Phase::Done => {
+                if b.patient == name {
+                    "same"
+                } else {
+                    // 지난 치료 끝난 베드에 새 환자
+                    self.bed_clear(id, src);
+                    set(self);
+                    "replaced"
+                }
+            }
+            Phase::Idle => {
+                if b.patient == name && b.since == since && b.note == note {
+                    "same"
+                } else {
+                    set(self);
+                    "set"
+                }
+            }
+        }
+    }
+
+    /// 환자가 베드에서 나감 (EMR 연결) — 끝난 베드 · 시작 안 한 베드만 비움, 치료 중이면 그대로
+    pub fn bed_vacate(&self, id: Id, name: &str, src: &str) -> &'static str {
+        let (Some(v), Some(b)) = (self.view(id), self.bed_info(id)) else { return "no bed" };
+        let matches = name.trim().is_empty() || b.patient == name.trim();
+        match v.phase {
+            Phase::Running | Phase::Paused => "treating",
+            _ if !matches => "other patient",
+            Phase::Done => {
+                self.bed_clear(id, src);
+                "cleared"
+            }
+            Phase::Idle => {
+                if b.patient.is_empty() && b.program.is_empty() {
+                    "empty"
+                } else {
+                    self.bed_clear(id, src);
+                    "cleared"
+                }
+            }
+        }
     }
 
     /// N분 더 — 진행 중이면 마지막 단계를 늘림, 끝났으면 「연장」 단계로 다시 시작
@@ -1188,5 +1260,41 @@ mod rem_tests {
         assert_eq!(fmt_due(next_repeat(d, Repeat::Monthly)), "2026-12-20T09:00");
         let e = parse_due("2026-01-31T08:30").unwrap();
         assert_eq!(fmt_due(next_repeat(e, Repeat::Monthly)), "2026-02-28T08:30");
+    }
+}
+
+#[cfg(test)]
+mod bed_tests {
+    use super::*;
+
+    #[test]
+    fn emr_patient_and_vacate_rules() {
+        // 시험 데이터 폴더 (실제 %APPDATA%\Tempo 를 건드리지 않게)
+        let dir = std::env::temp_dir().join(format!("tempo-bedtest-{}", std::process::id()));
+        std::env::set_var("TEMPO_DIR", &dir);
+        let core = Core::new(Data { timers: vec![], ..Data::seed() }, (0.0, 0.0, 1920.0, 1080.0), (0.0, 0.0, 1920.0, 1080.0));
+        core.ensure_beds(3);
+        let id = |no: u32| core.data().timers.iter().find(|t| t.bed.as_ref().map(|b| b.no) == Some(no)).map(|t| t.id).unwrap();
+        let b = |no: u32| core.data().timers.iter().find(|t| t.bed.as_ref().map(|b| b.no) == Some(no)).and_then(|t| t.bed.clone()).unwrap();
+        // 들어옴 → 이름만, 시작 안 함
+        assert_eq!(core.bed_set_patient(id(1), "가", "10:02", "허리 약침", "t"), "set");
+        assert_eq!((b(1).patient.as_str(), b(1).since.as_str()), ("가", "10:02"));
+        assert_eq!(core.view(id(1)).unwrap().phase, Phase::Idle);
+        assert_eq!(core.bed_set_patient(id(1), "가", "10:02", "허리 약침", "t"), "same");
+        // 치료 중엔 다른 환자로 안 바뀜, 나가도 안 비움
+        let steps = vec![crate::model::Step { name: "침".into(), secs: 900, sound: "none".into() }];
+        core.bed_start(id(1), "침 15분", steps, "가", "t");
+        assert_eq!(core.bed_set_patient(id(1), "나", "10:20", "", "t"), "busy");
+        assert_eq!(core.bed_vacate(id(1), "가", "t"), "treating");
+        assert_eq!(b(1).patient, "가");
+        // 시작 전에 나감 → 비움
+        core.bed_set_patient(id(2), "다", "10:05", "", "t");
+        assert_eq!(core.bed_vacate(id(2), "다", "t"), "cleared");
+        assert!(b(2).patient.is_empty() && b(2).since.is_empty());
+        // 다른 환자 이름으로 나감 신호 → 그대로
+        core.bed_set_patient(id(3), "라", "10:06", "", "t");
+        assert_eq!(core.bed_vacate(id(3), "마", "t"), "other patient");
+        assert_eq!(b(3).patient, "라");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
