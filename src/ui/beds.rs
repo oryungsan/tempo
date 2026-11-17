@@ -309,6 +309,15 @@ impl BedAction {
                     Phase::Done => (format!("끝 +{} · {}", hms(v.done_for.unwrap_or_default()), b.program), p.red),
                 };
                 ui.label(RichText::new(txt).color(c).size(14.0));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if super::card::shown(core, &def, &v) {
+                        if ghost(ui, p, "카드 닫기").on_hover_text("이 베드의 떠 있는 카드 닫기").clicked() {
+                            core.hide_card(id);
+                        }
+                    } else if ghost(ui, p, "카드 열기").on_hover_text("이 베드를 떠 있는 카드로 (닫을 때까지)").clicked() {
+                        core.open_card(id);
+                    }
+                });
             });
             ui.add_space(8.0);
             ui.horizontal(|ui| {

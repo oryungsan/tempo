@@ -80,6 +80,13 @@ pub fn ui(ui: &mut Ui, core: &Arc<Core>, p: &Pal, def: &TimerDef, v: &TimerView,
             if ghost(ui, p, "편집").clicked() {
                 act = Action::Edit;
             }
+            if super::card::shown(core, def, v) {
+                if ghost(ui, p, "카드 닫기").clicked() {
+                    core.hide_card(def.id);
+                }
+            } else if ghost(ui, p, "카드 열기").clicked() {
+                core.open_card(def.id);
+            }
             let mut s = style;
             egui::ComboBox::from_id_salt(("focus-style", def.id)).selected_text(format!("디자인 · {}", s.label())).width(140.0).show_ui(ui, |ui| {
                 for x in Style::ALL {

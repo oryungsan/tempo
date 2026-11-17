@@ -82,6 +82,15 @@ pub fn card_on_top(core: &Core, def: &TimerDef) -> bool {
     def.card_on_top.unwrap_or_else(|| core.data().settings.cards_on_top)
 }
 
+/// 지금 떠 있어야 하나 — 카드 설정(베드 = 치료실 설정) 또는 직접 연 카드, 닫은 카드는 빼고. (「카드 띄우기」 효과는 따로)
+pub fn shown(core: &Core, def: &TimerDef, v: &TimerView) -> bool {
+    if core.card_hidden(def.id) {
+        return false;
+    }
+    let by_setting = if def.bed.is_some() { core.data().settings.bed_cards && v.phase != Phase::Idle } else { card_visible(def, v) };
+    by_setting || core.card_opened(def.id)
+}
+
 pub fn card_visible(def: &TimerDef, v: &TimerView) -> bool {
     match def.card {
         CardMode::Always => true,
@@ -278,7 +287,7 @@ fn card_menu(core: &Arc<Core>, def: &TimerDef, v: &TimerView, st: &CardState, st
     items.push(Item::Sep);
     items.push(cmd(30, "집중 화면 열기"));
     items.push(cmd(31, "편집…"));
-    items.push(cmd(33, "카드 닫기 (다시 시작하면 표시)"));
+    items.push(cmd(33, "카드 닫기 (메인 창 · 트레이에서 다시 열기)"));
     items.push(cmd(32, if def.card == CardMode::Always { "앞으로 실행 중에만 카드 표시" } else { "앞으로 카드 표시 안 함" }));
     let core = core.clone();
     let card_mode = def.card;
@@ -440,7 +449,7 @@ fn draw(ui: &mut egui::Ui, ctx: &egui::Context, core: &Arc<Core>, def: &TimerDef
         let col = if rx.hovered() { Color32::WHITE } else { pc.muted };
         p.line_segment([xc + egui::vec2(-s, -s), xc + egui::vec2(s, s)], Stroke::new(1.6_f32 * k, col));
         p.line_segment([xc + egui::vec2(-s, s), xc + egui::vec2(s, -s)], Stroke::new(1.6_f32 * k, col));
-        if rx.on_hover_text("카드 닫기 — 다시 시작하면 다시 뜹니다").clicked() {
+        if rx.on_hover_text("카드 닫기 — 메인 창 타이머 메뉴 · 트레이에서 다시 열 수 있습니다").clicked() {
             core.hide_card(def.id);
         }
     }

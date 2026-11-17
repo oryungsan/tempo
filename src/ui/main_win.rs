@@ -471,6 +471,14 @@ fn timer_card(ui: &mut Ui, core: &Arc<Core>, st: &mut MainState, p: &Pal, def: &
     }
     egui::popup::popup_below_widget(ui, pop, &mresp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
         ui.set_min_width(190.0);
+        if super::card::shown(core, def, v) {
+            if ui.button("떠 있는 카드 닫기").clicked() {
+                core.hide_card(def.id);
+            }
+        } else if ui.button("떠 있는 카드 열기").clicked() {
+            core.open_card(def.id);
+        }
+        ui.separator();
         if ui.button("편집…").clicked() {
             st.timer_edit = Some(TimerEdit::new(def.clone(), false));
         }

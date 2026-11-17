@@ -111,6 +111,8 @@ pub struct Core {
     stats: Mutex<Stats>,
     /// 닫은 카드 (그 타이머를 다시 시작하면 다시 보임)
     hidden_cards: Mutex<std::collections::HashSet<Id>>,
+    /// 직접 연 카드 (카드 설정이 「끄기」거나 대기 중이어도 보임, 닫을 때까지)
+    opened_cards: Mutex<std::collections::HashSet<Id>>,
     /// 리마인더별로 이미 울린 due (같은 시각에 두 번 안 울리게)
     rem_fired: Mutex<HashMap<Id, String>>,
     /// To Do 연동 상태 (설정 화면 표시용)
@@ -147,6 +149,7 @@ impl Core {
             main_visible: AtomicBool::new(false),
             rem_fired: Mutex::new(HashMap::new()),
             hidden_cards: Mutex::new(HashSet::new()),
+            opened_cards: Mutex::new(HashSet::new()),
             todo: Mutex::new(Default::default()),
             stats: Mutex::new(std::fs::read_to_string(stats_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()),
             bench_until: Mutex::new(None),
@@ -644,8 +647,29 @@ impl Core {
 
     /// 떠 있는 카드 닫기 — 그 타이머를 다시 시작하면 다시 보임
     pub fn hide_card(&self, id: Id) {
+        self.opened_cards.lock().unwrap().remove(&id);
         self.hidden_cards.lock().unwrap().insert(id);
         self.repaint();
+    }
+
+    /// 카드 다시 열기 (진행 중이든 아니든)
+    pub fn open_card(&self, id: Id) {
+        self.hidden_cards.lock().unwrap().remove(&id);
+        self.opened_cards.lock().unwrap().insert(id);
+        self.repaint();
+    }
+
+    /// 닫은 카드 모두 다시 열기 (트레이 메뉴)
+    pub fn reopen_closed_cards(&self) -> usize {
+        let ids: Vec<Id> = self.hidden_cards.lock().unwrap().drain().collect();
+        let n = ids.len();
+        self.opened_cards.lock().unwrap().extend(ids);
+        self.repaint();
+        n
+    }
+
+    pub fn card_opened(&self, id: Id) -> bool {
+        self.opened_cards.lock().unwrap().contains(&id)
     }
 
     pub fn card_hidden(&self, id: Id) -> bool {
@@ -1337,6 +1361,40 @@ mod bed_tests {
         assert!((v.total_rem.as_secs_f32() - before.as_secs_f32()).abs() < 0.5, "{:?} vs {:?}", v.total_rem, before);
         // 파일은 한 번만
         assert!(!dir.join("update-runs.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cards_can_be_reopened_while_running() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("tempo-cards-{}", std::process::id()));
+        std::env::set_var("TEMPO_DIR", &dir);
+        let mut t = TimerDef::simple("라면", 180, "#5B8DEF");
+        t.card = crate::model::CardMode::WhenActive;
+        let mut off = TimerDef::simple("숨김", 180, "#5B8DEF");
+        off.card = crate::model::CardMode::Off;
+        let (id, oid) = (t.id, off.id);
+        let core = Core::new(Data { timers: vec![t, off], ..Data::seed() }, (0.0, 0.0, 1920.0, 1080.0), (0.0, 0.0, 1920.0, 1080.0));
+        let shown = |i: Id| {
+            let d = core.data().timers.iter().find(|x| x.id == i).cloned().unwrap();
+            crate::ui::card::shown(&core, &d, &core.view(i).unwrap())
+        };
+        core.cmd(id, Cmd::Start, "t");
+        assert!(shown(id));
+        // 진행 중 닫기 → 안 보임 → 다시 열기 → 보임
+        core.hide_card(id);
+        assert!(!shown(id));
+        core.open_card(id);
+        assert!(shown(id));
+        // 카드 설정이 「끄기」여도 직접 열면 보임, 닫으면 안 보임, 트레이 「닫은 카드 다시 열기」
+        assert!(!shown(oid));
+        core.open_card(oid);
+        assert!(shown(oid));
+        core.hide_card(oid);
+        core.hide_card(id);
+        assert!(!shown(oid) && !shown(id));
+        assert_eq!(core.reopen_closed_cards(), 2);
+        assert!(shown(oid) && shown(id));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

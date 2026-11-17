@@ -8,13 +8,17 @@ use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, 
 pub fn build(core: Arc<Core>) -> Option<TrayIcon> {
     let menu = Menu::new();
     let open = MenuItem::new("Tempo 열기", true, None);
+    let cards = MenuItem::new("닫은 카드 다시 열기", true, None);
     let quit = MenuItem::new("종료", true, None);
-    menu.append_items(&[&open, &PredefinedMenuItem::separator(), &quit]).ok()?;
-    let (open_id, quit_id) = (open.id().clone(), quit.id().clone());
+    menu.append_items(&[&open, &cards, &PredefinedMenuItem::separator(), &quit]).ok()?;
+    let (open_id, cards_id, quit_id) = (open.id().clone(), cards.id().clone(), quit.id().clone());
     let c1 = core.clone();
     MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
         if e.id == open_id {
             c1.open_main.store(true, Ordering::Relaxed);
+        } else if e.id == cards_id {
+            let n = c1.reopen_closed_cards();
+            crate::store::log(format!("tray: reopened {n} card(s)"));
         } else if e.id == quit_id {
             c1.quit.store(true, Ordering::Relaxed);
         }

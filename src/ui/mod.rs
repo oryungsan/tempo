@@ -223,9 +223,8 @@ impl eframe::App for App {
             let Some(v) = views.iter().find(|v| v.id == def.id) else { continue };
             // 「카드 띄우기」 효과 = 꺼 둔 카드도 끝나기 전엔 보임
             let fx_show = fx::show_card(&core, def, v);
-            // 베드 = 설정 「베드를 떠 있는 카드로도 보기」 하나로 (치료 중 · 끝난 베드)
-            let visible = if def.bed.is_some() { settings.bed_cards && v.phase != Phase::Idle } else { card::card_visible(def, v) };
-            if !fx_show && (!visible || core.card_hidden(def.id)) {
+            // 카드 설정(베드 = 치료실 설정) · 직접 연 카드, 닫은 카드는 빼고
+            if !fx_show && !card::shown(&core, def, v) {
                 continue;
             }
             let style = styles::style_of(def, settings.style);
