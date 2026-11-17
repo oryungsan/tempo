@@ -259,7 +259,7 @@ impl eframe::App for App {
         self.ev_cards.retain(|key, _| ev_shown.contains(key));
 
         // 치료실 보드 창
-        if settings.bed_board && !beds::board(ctx, &core, &mut self.board, &p) {
+        if settings.bed_board && main_win::page_visible(&core, main_win::Page::Beds) && !beds::board(ctx, &core, &mut self.board, &p) {
             core.update_quiet(|d| d.settings.bed_board = false);
         }
         ring::show(ctx, &core, &p);

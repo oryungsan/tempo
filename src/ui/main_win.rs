@@ -23,6 +23,37 @@ pub enum Page {
     Settings,
 }
 
+/// 설정에서 숨길 수 있는 메뉴 (타이머 · 설정은 항상)
+pub const OPTIONAL: [(Page, &str, &str, &str); 7] = [
+    (Page::Beds, "beds", "🏥", "치료실"),
+    (Page::Alarms, "alarms", "⏰", "알람"),
+    (Page::Reminders, "reminders", "☑", "리마인더"),
+    (Page::Stopwatch, "stopwatch", "⏱", "스톱워치"),
+    (Page::Countdown, "countdown", "🏁", "카운트다운"),
+    (Page::Dday, "dday", "📅", "디데이"),
+    (Page::World, "world", "🌐", "월드타임"),
+];
+
+fn page_key(p: Page) -> Option<&'static str> {
+    OPTIONAL.iter().find(|x| x.0 == p).map(|x| x.1)
+}
+
+/// 기본값 — 치료실은 베드가 있는 PC 에서만 (일반 사용자에겐 숨김)
+fn default_visible(key: &str, has_beds: bool) -> bool {
+    key != "beds" || has_beds
+}
+
+pub fn menu_visible(menu: &std::collections::BTreeMap<String, bool>, key: &str, has_beds: bool) -> bool {
+    menu.get(key).copied().unwrap_or_else(|| default_visible(key, has_beds))
+}
+
+/// 이 메뉴가 사이드바에 보이나
+pub fn page_visible(core: &Core, p: Page) -> bool {
+    let Some(k) = page_key(p) else { return true };
+    let d = core.data();
+    menu_visible(&d.settings.menu, k, d.timers.iter().any(|t| t.bed.is_some()))
+}
+
 #[derive(Default)]
 pub struct Stopwatch {
     since: Option<Instant>,
@@ -92,6 +123,10 @@ fn sw_text(d: Duration) -> String {
 }
 
 pub fn ui(ctx: &egui::Context, core: &Arc<Core>, st: &mut MainState, p: &Pal) {
+    // 숨긴 메뉴에 있었으면 타이머로
+    if !page_visible(core, st.page) {
+        st.page = Page::Timers;
+    }
     // 파일 선택 결과 반영
     if let Some((t, s)) = st.slot.lock().unwrap().take() {
         if let Some(e) = st.timer_edit.as_mut() {
@@ -201,6 +236,9 @@ fn sidebar(ctx: &egui::Context, core: &Arc<Core>, st: &mut MainState, p: &Pal, v
                 (Page::World, "🌐", "월드타임", String::new()),
                 (Page::Settings, "⚙", "설정", String::new()),
             ] {
+                if !page_visible(core, page) {
+                    continue;
+                }
                 let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 38.0), Sense::click());
                 let sel = st.page == page;
                 if sel {
@@ -755,6 +793,33 @@ fn settings_page(ui: &mut Ui, core: &Arc<Core>, st: &mut MainState, p: &Pal) {
     let timers: Vec<(Id, String)> = core.data().timers.iter().map(|t| (t.id, t.name.clone())).collect();
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.set_max_width(ui.available_width().min(760.0));
+        let has_beds = core.data().timers.iter().any(|t| t.bed.is_some());
+        section(ui, p, "메뉴", |ui| {
+            ui.label(RichText::new("왼쪽 메뉴에 보일 기능 — 안 쓰는 건 끄세요 (숨겨도 기능은 그대로 돌고, 이 PC 에만 적용). 타이머 · 설정은 항상 보입니다.").color(p.muted).size(12.5));
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+                for (_, key, icon, label) in OPTIONAL {
+                    let on = menu_visible(&s.menu, key, has_beds);
+                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(132.0, 40.0), Sense::click());
+                    let pt = ui.painter();
+                    pt.rect_filled(rect, cr(10.0), if on { p.accent.gamma_multiply(0.16) } else { p.input });
+                    pt.rect_stroke(rect, cr(10.0), Stroke::new(1.0_f32, if on { p.accent } else { p.border }), egui::StrokeKind::Inside);
+                    pt.text(Pos2::new(rect.left() + 20.0, rect.center().y), Align2::CENTER_CENTER, icon, FontId::proportional(15.0), if on { p.accent } else { p.faint });
+                    pt.text(Pos2::new(rect.left() + 36.0, rect.center().y), Align2::LEFT_CENTER, label, FontId::proportional(13.5), if on { p.text } else { p.faint });
+                    pt.text(Pos2::new(rect.right() - 12.0, rect.center().y), Align2::RIGHT_CENTER, if on { "✔" } else { "" }, FontId::proportional(13.0), p.accent);
+                    if resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if resp.clicked() {
+                        s.menu.insert(key.to_string(), !on);
+                    }
+                }
+            });
+            if !menu_visible(&s.menu, "beds", has_beds) {
+                ui.label(RichText::new("치료실 = 한의원 · 물리치료실처럼 베드마다 치료 시간을 재는 기능 (기본 숨김)").color(p.faint).size(12.0));
+            }
+        });
         section(ui, p, "일반", |ui| {
             row(ui, p, "Windows 시작 시 자동 실행", "로그인하면 트레이에 조용히 켜집니다", |ui| {
                 if toggle(ui, p, &mut s.autostart).changed() && !store::set_autostart(s.autostart) {
@@ -843,6 +908,7 @@ fn settings_page(ui: &mut Ui, core: &Arc<Core>, st: &mut MainState, p: &Pal) {
                 .size(12.0),
             );
         });
+        if menu_visible(&s.menu, "beds", has_beds) {
         section(ui, p, "치료실", |ui| {
             row(ui, p, "베드 치료가 끝나면 음성 안내", "「3번 베드 치료가 끝났습니다」 — Windows 한국어 음성, 볼륨은 위 「소리」 볼륨", |ui| {
                 if ghost(ui, p, "들어 보기").clicked() {
@@ -855,6 +921,7 @@ fn settings_page(ui: &mut Ui, core: &Arc<Core>, st: &mut MainState, p: &Pal) {
                 toggle(ui, p, &mut s.bed_board);
             });
         });
+        }
         section(ui, p, "PC 연동", |ui| sync_section(ui, p, &mut s.sync));
         section(ui, p, "업데이트", |ui| update_section(ui, core, p, &mut s.update_mode));
         section(ui, p, "데이터", |ui| {
@@ -1231,5 +1298,24 @@ fn todo_section(ui: &mut Ui, core: &Arc<Core>, p: &Pal, s: &mut crate::model::To
                 ui.label(RichText::new(e).color(p.red).size(12.5));
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod menu_tests {
+    use super::*;
+
+    #[test]
+    fn beds_hidden_by_default_without_beds() {
+        let mut m = std::collections::BTreeMap::new();
+        assert!(!menu_visible(&m, "beds", false));
+        assert!(menu_visible(&m, "beds", true));
+        assert!(menu_visible(&m, "world", false));
+        m.insert("beds".to_string(), true);
+        m.insert("world".to_string(), false);
+        assert!(menu_visible(&m, "beds", false));
+        assert!(!menu_visible(&m, "world", false));
+        m.insert("beds".to_string(), false);
+        assert!(!menu_visible(&m, "beds", true));
     }
 }
