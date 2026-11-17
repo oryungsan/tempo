@@ -412,6 +412,9 @@ pub struct Settings {
     /// 치료실 보드 창을 켜 둠 (다시 켜도 열림, 이 PC)
     #[serde(default)]
     pub bed_board: bool,
+    /// 베드를 떠 있는 카드로도 보기 — 치료 중 · 끝난 베드 (이 PC, 기본 끔)
+    #[serde(default)]
+    pub bed_cards: bool,
     /// 메뉴 보이기 (이 PC) — 키: beds · alarms · reminders · stopwatch · countdown · dday · world.
     /// 없으면 기본: 치료실 = 베드가 있을 때만, 나머지 = 보임
     #[serde(default)]
@@ -493,6 +496,7 @@ impl Default for Settings {
             sync: SyncSettings::default(),
             bed_voice: true,
             bed_board: false,
+            bed_cards: false,
             menu: Default::default(),
         }
     }

@@ -1,6 +1,6 @@
 [package]
 name = "tempo"
-version = "1.10.0"
+version = "1.10.1"
 edition = "2021"
 description = "Tempo — 타이머 · 알람 · 리마인더 · 스톱워치 · 카운트다운 · 디데이 · 월드타임 (Windows)"
 license = "MIT"

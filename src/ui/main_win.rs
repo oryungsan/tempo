@@ -920,6 +920,10 @@ fn settings_page(ui: &mut Ui, core: &Arc<Core>, st: &mut MainState, p: &Pal) {
             row(ui, p, "치료실 보드 창", "치료실 모니터 · TV 에 크게 띄우는 베드 판 (F11 전체 화면). 켜 두면 Tempo 를 다시 켜도 열립니다", |ui| {
                 toggle(ui, p, &mut s.bed_board);
             });
+            ui.separator();
+            row(ui, p, "베드를 떠 있는 카드로도 보기", "치료 중 · 끝난 베드를 화면에 떠 있는 작은 카드로 (이 PC 만, 기본 끔)", |ui| {
+                toggle(ui, p, &mut s.bed_cards);
+            });
         });
         }
         section(ui, p, "PC 연동", |ui| sync_section(ui, p, &mut s.sync));

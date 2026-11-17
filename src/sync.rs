@@ -68,6 +68,12 @@ fn upsert<T: serde::Serialize + serde::de::DeserializeOwned>(list: &mut Vec<T>, 
         return true;
     };
     let mut nv = v.clone();
+    if let (None, Value::Object(o)) = (pos, &mut nv) {
+        // 새 항목: 베드 타이머는 카드 끔으로 시작 (PC 별 값)
+        if o.get("bed").map(|b| !b.is_null()).unwrap_or(false) && keep.contains(&"card") {
+            o.insert("card".into(), Value::String("Off".into()));
+        }
+    }
     if let (Some(i), Value::Object(o)) = (pos, &mut nv) {
         if let Ok(Value::Object(old)) = serde_json::to_value(&list[i]) {
             for k in keep {
@@ -1306,6 +1312,28 @@ mod tests {
         assert!(hint_for(&format!("{ERR_UNREACH} (x)")).unwrap().contains("방화벽"));
         assert!(hint_for(ERR_CODE).is_some());
         assert!(hint_for("뭔가 다른 오류").is_none());
+    }
+
+
+    #[test]
+    fn new_bed_from_other_pc_has_card_off() {
+        let mut a = Data { timers: vec![], ..Data::seed() };
+        let mut t = TimerDef::simple("3번 베드", 900, "#5B8DEF");
+        t.bed = Some(crate::model::BedInfo { no: 3, ..Default::default() });
+        let mut v = serde_json::to_value(&t).unwrap();
+        v.as_object_mut().unwrap().remove("card");
+        apply_items(&mut a, &[(format!("t:{}", t.id), Some(v.clone()))]);
+        assert_eq!(a.timers[0].card, crate::model::CardMode::Off);
+        // 이 PC 에서 바꾼 값은 다음 반영에도 유지
+        a.timers[0].card = crate::model::CardMode::Always;
+        apply_items(&mut a, &[(format!("t:{}", t.id), Some(v))]);
+        assert_eq!(a.timers[0].card, crate::model::CardMode::Always);
+        // 보통 타이머는 기본값 그대로
+        let n = TimerDef::simple("라면", 180, "#5B8DEF");
+        let mut nv = serde_json::to_value(&n).unwrap();
+        nv.as_object_mut().unwrap().remove("card");
+        apply_items(&mut a, &[(format!("t:{}", n.id), Some(nv))]);
+        assert_eq!(a.timers.iter().find(|x| x.id == n.id).unwrap().card, crate::model::CardMode::WhenActive);
     }
 
 }
