@@ -39,6 +39,7 @@ pub enum RingKind {
     Timer(Id),
     Reminder(Id),
     Countdown(Id),
+    Dday(Id),
 }
 
 pub struct Ring {
@@ -91,6 +92,8 @@ pub struct Core {
     pub edit_request: Mutex<Option<Id>>,
     /// 카드 두 번 누름 → 메인 창에서 그 타이머 집중 화면
     pub focus_request: Mutex<Option<Id>>,
+    /// 카운트다운 · 디데이 카드에서 → 메인 창에서 편집 (true = 디데이)
+    pub clock_request: Mutex<Option<(bool, Id)>>,
     stats: Mutex<Stats>,
     /// 닫은 카드 (그 타이머를 다시 시작하면 다시 보임)
     hidden_cards: Mutex<std::collections::HashSet<Id>>,
@@ -122,6 +125,7 @@ impl Core {
             quit: AtomicBool::new(false),
             edit_request: Mutex::new(None),
             focus_request: Mutex::new(None),
+            clock_request: Mutex::new(None),
             rem_fired: Mutex::new(HashMap::new()),
             hidden_cards: Mutex::new(HashSet::new()),
             todo: Mutex::new(Default::default()),
@@ -500,6 +504,7 @@ impl Core {
         self.tick_alarms();
         self.tick_reminders();
         self.tick_countdowns();
+        self.tick_ddays();
         // 10분 넘게 울린 건 정리
         let stale: Vec<RingKind> =
             self.rings.lock().unwrap().iter().filter(|r| r.since.elapsed() > Duration::from_secs(600)).map(|r| r.kind).collect();
@@ -659,6 +664,72 @@ impl Core {
             log(format!("countdown '{}' reached ({}) ringing", c.title, c.target));
             let sub = format!("카운트다운 · {} {}", crate::dday::date_ko(t.date(), now.date()), t.format("%H:%M"));
             self.push_ring(RingKind::Countdown(c.id), c.title.clone(), sub, Some(c.sound.clone()));
+        }
+    }
+
+    // ── 디데이 알림 ─────────────────────────────────────
+
+    pub fn upsert_dday(&self, mut v: crate::model::Dday) {
+        // 저장 시점에 이미 지난 알림은 울리지 않음 (오늘 15시에 만든 「오늘 09:00」 알림 등)
+        let now = Local::now().naive_local();
+        for a in crate::dday::due_alerts(&v, now) {
+            if !v.fired.contains(&a.key) {
+                v.fired.push(a.key);
+            }
+        }
+        self.update(|d| match d.ddays.iter_mut().find(|x| x.id == v.id) {
+            Some(x) => *x = v,
+            None => d.ddays.push(v),
+        });
+    }
+
+    pub fn delete_dday(&self, id: Id) {
+        self.dismiss(RingKind::Dday(id));
+        self.update(|d| d.ddays.retain(|x| x.id != id));
+    }
+
+    fn tick_ddays(&self) {
+        let now = Local::now().naive_local();
+        let mut fire: Vec<(crate::model::Dday, crate::dday::Alert)> = Vec::new();
+        for d in self.data().ddays.iter().filter(|d| d.notify) {
+            for a in crate::dday::due_alerts(d, now) {
+                if !d.fired.contains(&a.key) {
+                    fire.push((d.clone(), a));
+                }
+            }
+        }
+        if fire.is_empty() {
+            return;
+        }
+        self.update(|data| {
+            for (d, a) in &fire {
+                if let Some(x) = data.ddays.iter_mut().find(|x| x.id == d.id) {
+                    x.fired.push(a.key.clone());
+                    let n = x.fired.len();
+                    if n > 20 {
+                        x.fired.drain(..n - 20);
+                    }
+                }
+            }
+        });
+        // 같은 디데이 알림이 겹치면 (예: 1일 전 + 그날) 가까운 것 하나만
+        let mut seen: Vec<Id> = Vec::new();
+        fire.sort_by_key(|(_, a)| a.before);
+        for (d, a) in fire {
+            if seen.contains(&d.id) {
+                continue;
+            }
+            seen.push(d.id);
+            let day = crate::dday::date_ko(a.date, now.date());
+            let sub = match (a.before, d.mode) {
+                (0, crate::model::DdayMode::Until) => format!("디데이 · 오늘이 그날 ({day})"),
+                (0, crate::model::DdayMode::Since) => format!("디데이 · 오늘 {}", a.label),
+                (0, crate::model::DdayMode::Yearly) => format!("디데이 · 오늘 {}", a.label),
+                (n, crate::model::DdayMode::Until) => format!("디데이 · D-{n} ({day})"),
+                (n, _) => format!("디데이 · {} D-{n} ({day})", a.label),
+            };
+            log(format!("dday '{}' alert {} ringing", d.title, a.key));
+            self.push_ring(RingKind::Dday(d.id), d.title.clone(), sub, Some(d.sound.clone()));
         }
     }
 

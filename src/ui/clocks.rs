@@ -22,10 +22,13 @@ pub struct ClockState {
 
 impl ClockState {
     pub fn apply_pick(&mut self, t: PickTarget, sound: String) {
+        if t != PickTarget::Alarm {
+            return;
+        }
         if let Some(e) = self.cd_edit.as_mut() {
-            if t == PickTarget::Alarm {
-                e.c.sound = sound;
-            }
+            e.c.sound = sound;
+        } else if let Some(e) = self.dd_edit.as_mut() {
+            e.d.sound = sound;
         }
     }
 
@@ -73,8 +76,9 @@ impl ClockState {
             }
         }
         if let Some(e) = self.dd_edit.as_mut() {
-            if let Outcome::Close = e.ui(ctx, core, p) {
+            if let Outcome::Close = e.ui(ctx, core, p, slot) {
                 self.dd_edit = None;
+                core.stop_preview();
             }
         }
     }
@@ -462,6 +466,9 @@ fn countdown_row(ui: &mut Ui, st: &mut ClockState, p: &Pal, c: &Countdown, now: 
     if c.pinned {
         chip_at("사이드바 고정", p.accent, p.accent.gamma_multiply(0.14));
     }
+    if c.card {
+        chip_at("떠 있는 카드", p.muted, p.input);
+    }
     if !c.notify {
         chip_at("알림 끔", p.muted, p.input);
     }
@@ -624,6 +631,12 @@ impl CountdownEdit {
                     ui.label(RichText::new("왼쪽 아래에 남은 시간 늘 표시").color(p.faint).size(12.5));
                 });
                 ui.end_row();
+                ui.label(RichText::new("떠 있는 카드").color(p.muted).size(12.5));
+                ui.horizontal(|ui| {
+                    toggle(ui, p, &mut self.c.card);
+                    ui.label(RichText::new("바탕 화면에 항상 떠 있는 작은 카드").color(p.faint).size(12.5));
+                });
+                ui.end_row();
             });
             ui.add_space(14.0);
             ui.horizontal(|ui| {
@@ -730,6 +743,8 @@ pub fn dday_page(ui: &mut Ui, core: &Arc<Core>, st: &mut ClockState, p: &Pal) {
 }
 
 fn dday_card(ui: &mut Ui, st: &mut ClockState, p: &Pal, d: &Dday, i: &dday::DdayInfo, w: f32, today: NaiveDate) {
+    let now = Local::now().naive_local();
+    let soon = dday::soon(d, i, now);
     let h = 176.0;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), Sense::click());
     let pt = ui.painter().clone();
@@ -751,7 +766,15 @@ fn dday_card(ui: &mut Ui, st: &mut ClockState, p: &Pal, d: &Dday, i: &dday::Dday
     let mr = Rect::from_min_size(Pos2::new(r - mode_g.size().x - 12.0, t + 16.0), mode_g.size() + egui::vec2(12.0, 6.0));
     pt.rect_filled(mr, cr(mr.height() / 2.0), p.input);
     pt.galley(mr.min + egui::vec2(6.0, 3.0), mode_g, p.muted);
-    pt.galley(Pos2::new(l + 18.0, t + 16.0), trunc(ui, &d.title, bold(15.5), p.text, mr.left() - l - 26.0), p.text);
+    let mut title_right = mr.left();
+    if d.notify {
+        // 알림 켜짐 = 종 + 시각
+        let ag = ui.fonts(|f| f.layout_no_wrap(format!("⏰ {}", d.alert_time), FontId::proportional(11.0), p.faint));
+        let ax = mr.left() - ag.size().x - 8.0;
+        pt.galley(Pos2::new(ax, mr.center().y - ag.size().y / 2.0), ag, p.faint);
+        title_right = ax;
+    }
+    pt.galley(Pos2::new(l + 18.0, t + 16.0), trunc(ui, &d.title, bold(15.5), p.text, title_right - l - 26.0), p.text);
 
     // 큰 글자
     let big_col = if past { p.muted } else { col };
@@ -759,7 +782,11 @@ fn dday_card(ui: &mut Ui, st: &mut ClockState, p: &Pal, d: &Dday, i: &dday::Dday
     let by = t + 46.0;
     let bh = bg.size().y;
     pt.galley(Pos2::new(l - 2.0, by), bg, big_col);
-    if !i.small.is_empty() {
+    if let Some((_, s)) = &soon {
+        // 하루 안 = 그날 0시까지 초 단위
+        let (_, clock) = dday::remain_text(*s);
+        draw_digits(&pt, ui.ctx(), Pos2::new(r, by + bh - 8.0), true, &clock, digits(22.0), col);
+    } else if !i.small.is_empty() {
         pt.text(Pos2::new(r, by + bh - 10.0), Align2::RIGHT_BOTTOM, &i.small, FontId::proportional(13.0), p.muted);
     }
     // 날짜
@@ -774,6 +801,7 @@ fn dday_card(ui: &mut Ui, st: &mut ClockState, p: &Pal, d: &Dday, i: &dday::Dday
     pt.galley(Pos2::new(l, t + 118.0), trunc(ui, &date_line, FontId::proportional(12.5), p.muted, r - l), p.muted);
     // 다음 기념일 · 오늘 표시
     let foot = match (&i.next, is_today) {
+        _ if soon.is_some() => soon.as_ref().map(|(label, _)| (format!("{label} 남은 시간"), col)),
         (Some((n, _, 0)), _) => Some((format!("오늘 {n}!"), col)),
         (Some((n, dt, left)), _) => Some((format!("다음 {n} · D-{left} ({})", date_ko(*dt, today)), p.faint)),
         (None, true) => Some(("오늘이에요!".to_string(), col)),
@@ -790,20 +818,25 @@ pub struct DdayEdit {
     pub d: Dday,
     is_new: bool,
     date: NaiveDate,
+    ah: u32,
+    am: u32,
     confirm_delete: bool,
 }
 
 impl DdayEdit {
     pub fn new(d: Dday, is_new: bool) -> Self {
         let date = d.date_nd().unwrap_or_else(|| Local::now().date_naive());
-        DdayEdit { d, is_new, date, confirm_delete: false }
+        let t = d.alert_naive();
+        DdayEdit { ah: t.hour(), am: t.minute(), d, is_new, date, confirm_delete: false }
     }
 
-    fn ui(&mut self, ctx: &egui::Context, core: &Arc<Core>, p: &Pal) -> Outcome {
+    fn ui(&mut self, ctx: &egui::Context, core: &Arc<Core>, p: &Pal, slot: &PickSlot) -> Outcome {
         let mut out = Outcome::Keep;
         let today = Local::now().date_naive();
+        let max_h = (ctx.screen_rect().height() - 150.0).max(260.0);
         egui::Modal::new(egui::Id::new("dd-edit")).show(ctx, |ui| {
-            ui.set_width(520.0);
+            ui.set_width(540.0);
+            egui::ScrollArea::vertical().max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
             ui.heading(if self.is_new { "새 디데이" } else { "디데이 편집" });
             ui.add_space(12.0);
             let hint = match self.d.mode {
@@ -862,20 +895,66 @@ impl DdayEdit {
                 ui.label(RichText::new("색").color(p.muted).size(12.5));
                 color_swatches(ui, p, &mut self.d.color);
                 ui.end_row();
+                ui.label(RichText::new("알림").color(p.muted).size(12.5));
+                ui.horizontal(|ui| {
+                    toggle(ui, p, &mut self.d.notify);
+                    let what = match self.d.mode {
+                        DdayMode::Until => "그날",
+                        DdayMode::Since => "100일 · 주년마다",
+                        DdayMode::Yearly => "해마다 그날",
+                    };
+                    if self.d.notify {
+                        ui.label(RichText::new(what).color(p.faint).size(12.5));
+                        ui.style_mut().override_font_id = Some(digits(18.0));
+                        ui.add(egui::DragValue::new(&mut self.ah).range(0..=23).speed(0.08).custom_formatter(|v, _| format!("{:02}", v as u32)));
+                        ui.label(RichText::new(":").font(digits(18.0)));
+                        ui.add(egui::DragValue::new(&mut self.am).range(0..=59).speed(0.15).custom_formatter(|v, _| format!("{:02}", v as u32)));
+                        ui.style_mut().override_font_id = None;
+                    } else {
+                        ui.label(RichText::new("알림 없이 표시만").color(p.faint).size(12.5));
+                    }
+                });
+                ui.end_row();
+                if self.d.notify {
+                    ui.label(RichText::new("미리 알림").color(p.muted).size(12.5));
+                    ui.horizontal_wrapped(|ui| {
+                        for n in [30u32, 14, 7, 3, 1] {
+                            let on = self.d.remind.contains(&n);
+                            if ui.selectable_label(on, format!("D-{n}")).clicked() {
+                                if on {
+                                    self.d.remind.retain(|x| *x != n);
+                                } else {
+                                    self.d.remind.push(n);
+                                }
+                            }
+                        }
+                        ui.label(RichText::new("같은 시각에").color(p.faint).size(12.0));
+                    });
+                    ui.end_row();
+                    ui.label(RichText::new("소리").color(p.muted).size(12.5));
+                    ui.horizontal(|ui| sound_picker(ui, p, core, "dd-sound", &mut self.d.sound, 170.0, slot, PickTarget::Alarm));
+                    ui.end_row();
+                }
                 ui.label(RichText::new("사이드바").color(p.muted).size(12.5));
                 ui.horizontal(|ui| {
                     toggle(ui, p, &mut self.d.pinned);
                     ui.label(RichText::new("왼쪽 아래에 늘 표시").color(p.faint).size(12.5));
                 });
                 ui.end_row();
+                ui.label(RichText::new("떠 있는 카드").color(p.muted).size(12.5));
+                ui.horizontal(|ui| {
+                    toggle(ui, p, &mut self.d.card);
+                    ui.label(RichText::new("바탕 화면에 항상 떠 있는 작은 카드").color(p.faint).size(12.5));
+                });
+                ui.end_row();
+            });
             });
             ui.add_space(14.0);
             ui.horizontal(|ui| {
                 if !self.is_new {
                     if self.confirm_delete {
                         if danger(ui, p, "정말 삭제").clicked() {
-                            let id = self.d.id;
-                            core.update(|d| d.ddays.retain(|x| x.id != id));
+                            core.delete_dday(self.d.id);
                             out = Outcome::Close;
                         }
                         if ghost(ui, p, "아니요").clicked() {
@@ -890,11 +969,9 @@ impl DdayEdit {
                     if ui.add_enabled_ui(ok, |ui| primary(ui, p, "  저장  ")).inner.clicked() {
                         self.d.title = self.d.title.trim().to_string();
                         self.d.date = self.date.format("%Y-%m-%d").to_string();
-                        let v = self.d.clone();
-                        core.update(|d| match d.ddays.iter_mut().find(|x| x.id == v.id) {
-                            Some(x) => *x = v,
-                            None => d.ddays.push(v),
-                        });
+                        self.d.alert_time = format!("{:02}:{:02}", self.ah, self.am);
+                        self.d.remind.sort_unstable_by(|a, b| b.cmp(a));
+                        core.upsert_dday(self.d.clone());
                         out = Outcome::Close;
                     }
                     if ghost(ui, p, "취소").clicked() {
@@ -928,7 +1005,11 @@ pub fn pinned(core: &Core) -> Vec<(Color32, String, String)> {
     }
     for x in d.ddays.iter().filter(|x| x.pinned) {
         if let Some(i) = dday::info(x, today) {
-            v.push((color_of(&x.color), x.title.clone(), i.big));
+            let val = match dday::soon(x, &i, now) {
+                Some((_, s)) => dday::remain_text(s).1,
+                None => i.big,
+            };
+            v.push((color_of(&x.color), x.title.clone(), val));
         }
     }
     v

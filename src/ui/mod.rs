@@ -4,6 +4,7 @@ pub mod card;
 pub mod clocks;
 pub mod drag;
 pub mod editor;
+pub mod event_card;
 pub mod focus;
 pub mod styles;
 pub mod main_win;
@@ -35,6 +36,7 @@ pub struct App {
     main_open: bool,
     main: main_win::MainState,
     cards: HashMap<Id, card::CardState>,
+    ev_cards: HashMap<(bool, Id), event_card::EvCardState>,
     _tray: Option<tray_icon::TrayIcon>,
     theme: Option<Theme>,
     /// 메인 창 제목 표시줄 색을 맞춘 테마 (창이 새로 열리면 None)
@@ -92,7 +94,7 @@ impl App {
             main.page = main_win::Page::Alarms;
             main.alarm_edit = Some(editor::AlarmEdit::new(crate::model::AlarmDef::new(), true));
         }
-        App { core, main_open: o.show_main, main, cards: HashMap::new(), _tray: tray, theme: None, titlebar: None, last_frame: None }
+        App { core, main_open: o.show_main, main, cards: HashMap::new(), ev_cards: HashMap::new(), _tray: tray, theme: None, titlebar: None, last_frame: None }
     }
 
     fn default_card_pos(&self, stack_y: f32, k: f32, style: crate::model::Style) -> egui::Pos2 {
@@ -133,6 +135,10 @@ impl eframe::App for App {
         }
         if let Some(id) = core.edit_request.lock().unwrap().take() {
             self.main.edit_timer(&core, id);
+        }
+        if let Some((is_dday, id)) = core.clock_request.lock().unwrap().take() {
+            self.main_open = true;
+            self.main.open_clock(&core, is_dday, id);
         }
         if let Some(id) = core.focus_request.lock().unwrap().take() {
             self.main.page = main_win::Page::Timers;
@@ -193,6 +199,7 @@ impl eframe::App for App {
         }
         if std::mem::take(&mut self.main.reset_cards) {
             self.cards.clear();
+            self.ev_cards.clear();
         }
 
         // 떠 있는 카드
@@ -221,12 +228,30 @@ impl eframe::App for App {
         // 안 보이는 카드는 상태도 버림 (다시 뜰 때 저장된 위치로)
         self.cards.retain(|id, _| shown.contains(id));
 
+        // 떠 있는 카운트다운 · 디데이 카드 — 타이머 카드 아래로 이어서 쌓기
+        let now = chrono::Local::now().naive_local();
+        let evs = event_card::floating(&core);
+        let mut ev_live = false;
+        let mut ev_shown = Vec::new();
+        for ev in &evs {
+            let pos = ev.card_pos().filter(|p| core.on_screen(p[0], p[1])).map(|p| egui::pos2(p[0], p[1])).unwrap_or_else(|| {
+                let (_, t, r, _) = core.work_area;
+                egui::pos2(r - event_card::W * k - 18.0, t + 18.0 + stack_y)
+            });
+            stack_y += event_card::H * k + 12.0;
+            let stt = self.ev_cards.entry(ev.key()).or_insert_with(|| event_card::EvCardState::new(pos));
+            event_card::show(ctx, &core, ev, stt, k, &p);
+            ev_live |= ev.live(now);
+            ev_shown.push(ev.key());
+        }
+        self.ev_cards.retain(|key, _| ev_shown.contains(key));
+
         ring::show(ctx, &core, &p);
 
         // 초 단위로 바뀌는 화면 (카운트다운 · 월드타임) · 사이드바 고정 카운트다운
-        let live_page = self.main_open && matches!(self.main.page, main_win::Page::Countdown | main_win::Page::World);
+        let live_page = self.main_open && matches!(self.main.page, main_win::Page::Countdown | main_win::Page::World | main_win::Page::Dday);
         let pinned_cd = self.main_open && core.data().countdowns.iter().any(|c| c.pinned && !c.fired);
-        let busy = views.iter().any(|v| v.phase == Phase::Running) || !core.rings().is_empty() || self.main.sw.running() || live_page || pinned_cd;
+        let busy = views.iter().any(|v| v.phase == Phase::Running) || !core.rings().is_empty() || self.main.sw.running() || live_page || pinned_cd || ev_live;
         if bench {
             core.update_ms.lock().unwrap().push(t0.elapsed().as_secs_f32() * 1000.0);
             ctx.request_repaint();

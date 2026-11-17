@@ -368,6 +368,11 @@ pub struct Countdown {
     /// 사이드바 아래에 고정
     #[serde(default)]
     pub pinned: bool,
+    /// 바탕 화면에 떠 있는 카드
+    #[serde(default)]
+    pub card: bool,
+    #[serde(default)]
+    pub card_pos: Option<[f32; 2]>,
 }
 
 fn cd_sound() -> String {
@@ -386,6 +391,8 @@ impl Countdown {
             sound: cd_sound(),
             fired: false,
             pinned: false,
+            card: false,
+            card_pos: None,
         }
     }
     pub fn target_dt(&self) -> Option<chrono::NaiveDateTime> {
@@ -443,11 +450,52 @@ pub struct Dday {
     /// 사이드바 아래에 고정
     #[serde(default)]
     pub pinned: bool,
+    /// 그날(매년 = 해마다, 그날부터 = 100일·주년마다) 알림
+    #[serde(default)]
+    pub notify: bool,
+    /// 알림 시각 "HH:MM"
+    #[serde(default = "nine")]
+    pub alert_time: String,
+    /// 미리 알림 — 며칠 전 (예: [7, 1])
+    #[serde(default)]
+    pub remind: Vec<u32>,
+    #[serde(default = "rem_sound")]
+    pub sound: String,
+    /// 이미 울린 알림 ("그날/며칠 전") — 같은 알림 두 번 안 울리게
+    #[serde(default)]
+    pub fired: Vec<String>,
+    /// 바탕 화면에 떠 있는 카드
+    #[serde(default)]
+    pub card: bool,
+    #[serde(default)]
+    pub card_pos: Option<[f32; 2]>,
+}
+
+fn nine() -> String {
+    "09:00".into()
 }
 
 impl Dday {
     pub fn new(title: &str, date: chrono::NaiveDate, mode: DdayMode, color: &str) -> Self {
-        Dday { id: new_id(), title: title.into(), date: date.format("%Y-%m-%d").to_string(), mode, color: color.into(), pinned: false }
+        Dday {
+            id: new_id(),
+            title: title.into(),
+            date: date.format("%Y-%m-%d").to_string(),
+            mode,
+            color: color.into(),
+            pinned: false,
+            notify: true,
+            alert_time: nine(),
+            remind: vec![],
+            sound: rem_sound(),
+            fired: vec![],
+            card: false,
+            card_pos: None,
+        }
+    }
+    /// 알림 시각 (잘못된 값이면 09:00)
+    pub fn alert_naive(&self) -> chrono::NaiveTime {
+        chrono::NaiveTime::parse_from_str(&self.alert_time, "%H:%M").unwrap_or_else(|_| chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap())
     }
     pub fn date_nd(&self) -> Option<chrono::NaiveDate> {
         chrono::NaiveDate::parse_from_str(&self.date, "%Y-%m-%d").ok()

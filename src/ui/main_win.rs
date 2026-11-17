@@ -56,6 +56,21 @@ impl MainState {
         MainState { page: Page::Timers, timer_edit: None, alarm_edit: None, sw: Stopwatch::default(), slot: Default::default(), reset_cards: false, focus: None, rem: Default::default(), clk: Default::default() }
     }
 
+    /// 카운트다운 · 디데이 카드에서 「편집」 → 그 페이지 + 편집 창
+    pub fn open_clock(&mut self, core: &Core, is_dday: bool, id: Id) {
+        if is_dday {
+            self.page = Page::Dday;
+            if let Some(d) = core.data().ddays.iter().find(|x| x.id == id).cloned() {
+                self.clk.dd_edit = Some(super::clocks::DdayEdit::new(d, false));
+            }
+        } else {
+            self.page = Page::Countdown;
+            if let Some(c) = core.data().countdowns.iter().find(|x| x.id == id).cloned() {
+                self.clk.cd_edit = Some(super::clocks::CountdownEdit::new(c, false));
+            }
+        }
+    }
+
     pub fn edit_timer(&mut self, core: &Core, id: Id) {
         if let Some(t) = core.data().timers.iter().find(|t| t.id == id).cloned() {
             self.page = Page::Timers;
@@ -771,7 +786,11 @@ fn settings_page(ui: &mut Ui, core: &Arc<Core>, st: &mut MainState, p: &Pal) {
             ui.separator();
             row(ui, p, "카드 위치 초기화", "모든 카드를 화면 오른쪽 위로 다시 모읍니다", |ui| {
                 if ghost(ui, p, "초기화").clicked() {
-                    core.update(|d| d.timers.iter_mut().for_each(|t| t.card_pos = None));
+                    core.update(|d| {
+                        d.timers.iter_mut().for_each(|t| t.card_pos = None);
+                        d.countdowns.iter_mut().for_each(|c| c.card_pos = None);
+                        d.ddays.iter_mut().for_each(|x| x.card_pos = None);
+                    });
                     st.reset_cards = true;
                 }
             });
