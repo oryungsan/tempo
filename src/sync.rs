@@ -625,6 +625,17 @@ fn bind_addr() -> String {
     std::env::var("TEMPO_SYNC_BIND").unwrap_or_else(|_| "0.0.0.0".into())
 }
 
+/// accept() 로 받은 소켓은 Windows 에서 상속 가능 핸들 → 잠깐 도는 자식(PowerShell 방화벽 확인 · 음성 안내)에게도
+/// 넘어가지 않게 (넘어가면 이쪽이 닫아도 그 자식이 끝날 때까지 연결이 안 끊김)
+fn no_inherit(st: &TcpStream) {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
+    if unsafe { SetHandleInformation(st.as_raw_socket() as usize as _, HANDLE_FLAG_INHERIT, 0) } == 0 {
+        // 자식 실행은 모두 상속 없이(crate::proc) 하므로 실패해도 연결은 그대로 — 기록만
+        log(format!("sync: 받은 연결의 상속 끄기 실패: {}", std::io::Error::last_os_error()));
+    }
+}
+
 fn host_loop(core: Arc<Core>, s: SyncSettings, stop: Arc<AtomicBool>) {
     if norm_code(&s.code).len() < 6 {
         set_status(|x| x.state = "연동 코드가 필요합니다".into());
@@ -661,6 +672,7 @@ fn host_loop(core: Arc<Core>, s: SyncSettings, stop: Arc<AtomicBool>) {
     while !stop.load(Ordering::Relaxed) {
         match l.accept() {
             Ok((st, addr)) => {
+                no_inherit(&st);
                 let (c, s2, stp) = (core.clone(), s.clone(), stop.clone());
                 std::thread::spawn(move || {
                     let _ = st.set_nonblocking(false);
@@ -721,18 +733,37 @@ fn join_loop(core: Arc<Core>, s: SyncSettings, stop: Arc<AtomicBool>) {
     }
     let target = if host.contains(':') { host.clone() } else { format!("{host}:{}", s.port) };
     let mut fails = 0u32;
+    let mut last_fail: Option<String> = None;
     while !stop.load(Ordering::Relaxed) {
         set_status(|x| x.state = format!("{target} 에 연결 중…"));
+        let mut was_conn = false;
         let addr = target.to_socket_addrs().ok().and_then(|mut a| a.next());
         let r = match addr {
             None => Err(format!("{ERR_NOADDR}: {target}")),
             Some(a) => match TcpStream::connect_timeout(&a, Duration::from_secs(4)) {
-                Ok(st) => conn(&core, st, target.clone(), &s, false, &stop),
+                Ok(st) => {
+                    let t = Instant::now();
+                    let r = conn(&core, st, target.clone(), &s, false, &stop);
+                    // 10초 넘게 이어졌으면 실제 연결이었음 → 끊긴 이유는 늘 기록 (호스트 쪽처럼)
+                    if t.elapsed() >= Duration::from_secs(10) {
+                        was_conn = true;
+                        last_fail = None;
+                        if let Err(e) = &r {
+                            log(format!("sync: {target} 연결 끝: {e}"));
+                        }
+                    }
+                    r
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => Err(format!("{ERR_REFUSED} ({target})")),
                 Err(e) => Err(format!("{ERR_UNREACH} ({target}): {e}")),
             },
         };
         if let Err(e) = r {
+            // 연결 못 함 · 인사에서 끊김(코드 · 버전 다름 …) — 같은 이유는 한 번만 (5초마다 쌓이지 않게)
+            if !was_conn && last_fail.as_deref() != Some(e.as_str()) {
+                log(format!("sync: {target} 연결 실패: {e}"));
+                last_fail = Some(e.clone());
+            }
             fails += 1;
             set_status(|x| {
                 x.hint = hint_for(&e);
@@ -869,11 +900,6 @@ pub enum Fw {
 
 static FW: Mutex<Option<(Instant, Fw)>> = Mutex::new(None);
 
-fn hidden(cmd: &mut std::process::Command) -> &mut std::process::Command {
-    use std::os::windows::process::CommandExt;
-    cmd.creation_flags(0x0800_0000)
-}
-
 pub fn fw_state() -> Fw {
     FW.lock().unwrap().as_ref().map(|x| x.1.clone()).unwrap_or(Fw::Unknown)
 }
@@ -893,10 +919,16 @@ pub fn fw_check_async() {
             "$r = Get-NetFirewallApplicationFilter -Program '{exe}' -ErrorAction SilentlyContinue | Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object {{ $_.Enabled -eq 'True' -and $_.Direction -eq 'Inbound' }}; \
              'ALLOW=' + @($r | Where-Object {{ $_.Action -eq 'Allow' }}).Count + ';BLOCK=' + @($r | Where-Object {{ $_.Action -eq 'Block' }}).Count"
         );
-        let out = hidden(std::process::Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script])).output();
-        let st = match out {
-            Ok(o) => {
-                let t = String::from_utf8_lossy(&o.stdout).to_string();
+        // 결과는 파일로 (표준 출력 파이프를 넘기려면 핸들 상속이 필요 — 상속 없이 실행하려고)
+        let out_file = crate::store::dir().join(format!("fw-check-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&out_file);
+        let script = format!("& {{ {script} }} | Set-Content -Encoding ASCII -LiteralPath '{}'", out_file.display().to_string().replace('\'', "''"));
+        use std::ffi::OsStr;
+        let ran = crate::proc::run_hidden(&crate::proc::powershell(), &[OsStr::new("-NoProfile"), OsStr::new("-NonInteractive"), OsStr::new("-Command"), OsStr::new(&script)], 60_000);
+        let out = std::fs::read_to_string(&out_file);
+        let _ = std::fs::remove_file(&out_file);
+        let st = match (ran, out) {
+            (Ok(Some(0)), Ok(t)) => {
                 let num = |k: &str| t.split(';').find_map(|p| p.trim().strip_prefix(k)).and_then(|v| v.trim().parse::<u32>().ok());
                 match (num("ALLOW="), num("BLOCK=")) {
                     (_, Some(b)) if b > 0 => Fw::Blocked,
@@ -905,7 +937,7 @@ pub fn fw_check_async() {
                     _ => Fw::Unknown,
                 }
             }
-            Err(_) => Fw::Unknown,
+            _ => Fw::Unknown,
         };
         log(format!("sync: firewall check = {st:?}"));
         *FW.lock().unwrap() = Some((Instant::now(), st));
@@ -945,7 +977,8 @@ pub fn fw_fix(port: u16) {
     let outer = format!("Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList '-NoProfile','-EncodedCommand','{enc}'");
     std::thread::spawn(move || {
         log("sync: firewall fix requested (UAC)");
-        let r = hidden(std::process::Command::new("powershell").args(["-NoProfile", "-Command", &outer])).status();
+        use std::ffi::OsStr;
+        let r = crate::proc::run_hidden(&crate::proc::powershell(), &[OsStr::new("-NoProfile"), OsStr::new("-Command"), OsStr::new(&outer)], 600_000);
         log(format!("sync: firewall fix done: {r:?}"));
         fw_check_async();
     });

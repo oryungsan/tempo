@@ -204,11 +204,22 @@ fn try_apply(core: &Arc<Core>, tag: &str) -> bool {
         set(core, |s| s.waiting = true);
         return false;
     }
+    // 상태 변경을 막고, 화면이 한 번 더 그려질 만큼 기다린 뒤 다시 확인 — 막 열린 편집 창
+    // (ui_hold 는 프레임 끝에 갱신) · 막 울린 알림이 있으면 풀고 다음 기회에
+    core.freeze(true);
+    std::thread::sleep(Duration::from_millis(700));
+    if !idle(core) {
+        core.freeze(false);
+        log("update: busy again — waiting");
+        set(core, |s| s.waiting = true);
+        return false;
+    }
     set(core, |s| s.waiting = false);
     APPLY_NOW.store(false, Ordering::Relaxed);
     match apply(core, tag) {
         Ok(()) => true,
         Err(e) => {
+            core.freeze(false);
             log(format!("update apply failed: {e}"));
             set(core, |s| {
                 s.error = Some(e);
@@ -227,30 +238,43 @@ fn apply(core: &Arc<Core>, tag: &str) -> Result<(), String> {
     if old.exists() {
         std::fs::remove_file(&old).map_err(|e| format!("tempo.old.exe 를 지울 수 없음: {e}"))?;
     }
+    // 진행 중인 타이머 넘기기 (새 버전 · 되돌린 옛 버전 모두 시작할 때 읽음) — 못 쓰면 바꾸지 않음
+    // (exe 를 바꾸기 전에 — 실패하면 아무것도 안 건드린 채 다음 기회에)
+    if !core.save_runs_for_update() {
+        return Err("진행 상태를 저장하지 못해 교체를 멈춤".into());
+    }
+    let undo_handover = || {
+        let _ = std::fs::remove_file(crate::core::handover_path());
+    };
     // 실행 중인 exe 도 이름 바꾸기는 됨
-    std::fs::rename(&exe, &old).map_err(|e| format!("현재 exe 이름 바꾸기 실패 (폴더 권한): {e}"))?;
+    if let Err(e) = std::fs::rename(&exe, &old) {
+        undo_handover();
+        return Err(format!("현재 exe 이름 바꾸기 실패 (폴더 권한): {e}"));
+    }
     if let Err(e) = std::fs::rename(&new, &exe) {
         let _ = std::fs::rename(&old, &exe);
+        undo_handover();
         return Err(format!("새 exe 놓기 실패: {e}"));
     }
-    // 진행 중인 타이머 넘기기 (새 버전 · 되돌린 옛 버전 모두 시작할 때 읽음)
-    core.save_runs_for_update();
     let me = std::process::id().to_string();
     let mut args: Vec<String> = vec!["--after-update".into(), me];
     if !core.main_visible.load(Ordering::Relaxed) {
         args.insert(0, "--tray".into());
     }
-    let child = match std::process::Command::new(&exe).args(&args).spawn() {
-        Ok(c) => c,
+    // 핸들 상속 없이 — 받아 둔 API · 연동 소켓이 새 프로세스로 넘어가면 이 프로세스가 끝나도 연결이 안 닫힘
+    let argv: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let child = match crate::proc::spawn(&exe, &argv) {
+        Ok(pid) => pid,
         Err(e) => {
             let _ = std::fs::rename(&exe, &new);
             let _ = std::fs::rename(&old, &exe);
+            undo_handover();
             return Err(format!("새 버전 실행 실패: {e}"));
         }
     };
     // 감시 = 옛 exe 로 (새 버전이 망가져도 돌아옴)
-    let _ = std::process::Command::new(&old).args(["--update-watch", tag, &std::process::id().to_string(), &child.id().to_string()]).spawn();
-    log(format!("update: {CURRENT} -> {tag}, restarting (new pid {})", child.id()));
+    let _ = crate::proc::spawn(&old, &["--update-watch", tag, &std::process::id().to_string(), &child.to_string()]);
+    log(format!("update: {CURRENT} -> {tag}, restarting (new pid {child})"));
     core.quit.store(true, Ordering::Relaxed);
     core.repaint();
     // 혹시 창 쪽이 안 닫히면
@@ -289,7 +313,8 @@ fn kill_pid(pid: u32) {
     }
 }
 
-fn api_version(port: u16) -> Option<String> {
+/// 새 버전의 (버전, 넘기기 (예정, 이어받음))
+fn api_version(port: u16) -> Option<(String, Option<(u64, u64)>)> {
     use std::io::Write;
     let mut s = std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_secs(2)).ok()?;
     let _ = s.set_read_timeout(Some(Duration::from_secs(3)));
@@ -299,7 +324,9 @@ fn api_version(port: u16) -> Option<String> {
     let _ = s.read_to_string(&mut buf);
     let body = buf.split("\r\n\r\n").nth(1)?;
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
-    v["current"].as_str().map(|x| x.to_string())
+    let h = &v["handover"];
+    let ho = h["expected"].as_u64().zip(h["restored"].as_u64());
+    v["current"].as_str().map(|x| (x.to_string(), ho))
 }
 
 /// --update-watch <새 버전> <옛 pid> <새 pid> — 옛 exe(tempo.old.exe)로 실행됨
@@ -307,13 +334,21 @@ pub fn watch(args: &[String]) {
     let tag = args.first().cloned().unwrap_or_default();
     let old_pid: u32 = args.get(1).and_then(|x| x.parse().ok()).unwrap_or(0);
     let new_pid: u32 = args.get(2).and_then(|x| x.parse().ok()).unwrap_or(0);
-    let port = store::load().0.settings.api_port;
+    let port = store::peek().map(|d| d.settings.api_port).unwrap_or(47830);
     wait_pid(old_pid, 15_000);
     let t0 = Instant::now();
     while t0.elapsed() < Duration::from_secs(45) {
         std::thread::sleep(Duration::from_secs(2));
-        if api_version(port).as_deref() == Some(tag.as_str()) {
+        if let Some((_, ho)) = api_version(port).filter(|x| x.0 == tag) {
             log(format!("update: {tag} running ok ({}s)", t0.elapsed().as_secs()));
+            // 새 버전이 넘기기를 다 이어받았을 때만 파일 정리. 모자라면 남겨 둠 (수동 · 되돌리기 때 다시 읽게)
+            match ho {
+                Some((e, r)) if e == r => {
+                    let _ = std::fs::remove_file(crate::core::handover_path());
+                }
+                Some((e, r)) => log(format!("update: {tag} restored only {r} of {e} running timer(s) — handover file kept")),
+                None => log(format!("update: {tag} did not report handover — handover file kept")),
+            }
             return;
         }
     }
@@ -332,7 +367,8 @@ pub fn watch(args: &[String]) {
         return;
     }
     let _ = std::fs::write(skip_path(), &tag);
-    let _ = std::process::Command::new(&exe).arg("--tray").spawn();
+    // --after-rollback = 남아 있는 넘기기 파일로 진행 상태 이어받기
+    let _ = crate::proc::spawn(&exe, &["--tray", "--after-rollback"]);
     log(format!("update rollback: restored previous version, {tag} will be skipped"));
 }
 
@@ -347,6 +383,8 @@ pub fn status_json(core: &Core) -> serde_json::Value {
         "busy": s.busy,
         "error": s.error,
         "last_check": s.last_check.map(|t| t.to_rfc3339()),
+        // 업데이트 · 되돌리기로 켜졌을 때 이어받은 진행 상태 (감시가 맞춰 봄)
+        "handover": core.handover.lock().unwrap().map(|(e, r)| serde_json::json!({ "expected": e, "restored": r })),
         "mode": format!("{:?}", core.data().settings.update_mode).to_lowercase(),
     })
 }

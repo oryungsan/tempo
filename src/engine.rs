@@ -330,7 +330,9 @@ impl Engine {
         }
         self.phase = Phase::Done;
         self.enter_step(self.durations.len() - 1, None);
-        self.done_at = Some(now);
+        // 실제로 끝난 시각 (= 감지 시각 − 넘친 시간). 절전 복귀 · tick 지연으로 늦게 알아채도
+        // 베드 「끝 · +N분」 초과 시간이 감지 시각부터 세지 않게
+        self.done_at = Some(now.checked_sub(carry).unwrap_or(now));
         ev.push(Event::Finished);
     }
 
@@ -528,10 +530,16 @@ mod tests {
         e.command(Cmd::Start, t0);
         e.tick(t0 + Duration::from_secs(11));
         assert_eq!(e.phase, Phase::Done);
-        // 8초 넘게 지나도 「끝」 그대로 + 초과 시간
+        // 8초 넘게 지나도 「끝」 그대로 + 초과 시간 (끝난 시각 t0+10 부터)
         e.tick(t0 + Duration::from_secs(40));
         assert_eq!(e.phase, Phase::Done);
-        assert_eq!(e.done_elapsed(t0 + Duration::from_secs(40)).unwrap().as_secs(), 29);
+        assert_eq!(e.done_elapsed(t0 + Duration::from_secs(40)).unwrap().as_secs(), 30);
+        // 15분 베드를 20분 뒤에야 처음 알아챔(절전 복귀) → 초과 5분부터
+        let mut g = Engine::with_opts(vec![Duration::from_secs(900)], o);
+        g.command(Cmd::Start, t0);
+        g.tick(t0 + Duration::from_secs(1200));
+        assert_eq!(g.phase, Phase::Done);
+        assert_eq!(g.done_elapsed(t0 + Duration::from_secs(1200)).unwrap().as_secs(), 300);
         // 보통 타이머는 대기로
         let mut f = Engine::with_opts(vec![Duration::from_secs(10)], Opts::default());
         f.command(Cmd::Start, t0);

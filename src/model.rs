@@ -748,11 +748,18 @@ impl Dday {
     }
     /// 실제 알림 목록 — 새 형식(alerts)이 비어 있으면 옛 형식(alert_time + remind)에서
     pub fn rules(&self) -> Vec<AlertRule> {
-        if !self.alerts.is_empty() {
-            return self.alerts.clone();
+        let mut v = if !self.alerts.is_empty() {
+            self.alerts.clone()
+        } else {
+            let mut v = vec![AlertRule::new(0, &self.alert_time)];
+            v.extend(self.remind.iter().filter(|n| **n > 0).map(|n| AlertRule::new(*n, &self.alert_time)));
+            v
+        };
+        // 화면에선 0~365 — 깨진 파일 · 다른 PC 에서 온 터무니없는 값이 날짜 계산을 넘쳐
+        // 앱이 꺼지지 않게 (release 는 panic = abort → tick 마다 다시 꺼짐)
+        for r in &mut v {
+            r.before = r.before.min(3650);
         }
-        let mut v = vec![AlertRule::new(0, &self.alert_time)];
-        v.extend(self.remind.iter().filter(|n| **n > 0).map(|n| AlertRule::new(*n, &self.alert_time)));
         v
     }
     pub fn date_nd(&self) -> Option<chrono::NaiveDate> {

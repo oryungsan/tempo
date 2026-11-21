@@ -304,6 +304,9 @@ pub fn spawn(core: Arc<Core>) {
                     }
                 }
                 let s = sess.as_mut().unwrap();
+                // 맞출 때마다 새 연결 — 토큰 갱신(약 58분마다) · Graph(실패 뒤 4분) 처럼 오래 쉰 연결을 다시 쓰면
+                // 서버가 이미 끊은 연결이라 「원격 호스트에 의해 강제로 끊겼습니다」(10054)로 실패했음 (매시 2번)
+                s.agent = agent();
                 core.todo.lock().unwrap().busy = true;
                 core.repaint();
                 let r = sync(&core, s);

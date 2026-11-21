@@ -277,6 +277,12 @@ fn sidebar(ctx: &egui::Context, core: &Arc<Core>, st: &mut MainState, p: &Pal, v
                 ui.label(RichText::new(date_line).color(p.faint).size(12.0));
                 ui.label(RichText::new(now.format("%H:%M").to_string()).font(digits(26.0)).color(p.muted));
                 ui.add_space(6.0);
+                if crate::store::save_failing() && ui.available_height() > 40.0 {
+                    let r = ui.add(egui::Label::new(RichText::new("⚠ 데이터 저장 안 됨").color(p.red).size(12.5)).sense(Sense::click()));
+                    if r.on_hover_text("data.json 에 저장하지 못하고 있습니다 — 설정 → 기록 보기").clicked() {
+                        st.page = Page::Settings;
+                    }
+                }
                 let ready = core.update_state.lock().unwrap().ready.clone();
                 if let Some(v) = ready {
                     if ui.available_height() > 40.0 {
@@ -942,7 +948,7 @@ fn settings_page(ui: &mut Ui, core: &Arc<Core>, st: &mut MainState, p: &Pal) {
                     store::open_path(&store::dir());
                 }
                 if ghost(ui, p, "기록 보기").clicked() {
-                    let _ = std::process::Command::new("notepad.exe").arg(store::log_path()).spawn();
+                    let _ = crate::proc::start(&crate::proc::windows_exe("notepad.exe"), &[store::log_path().as_os_str()], false);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(RichText::new(format!("Tempo {}", env!("CARGO_PKG_VERSION"))).color(p.faint).size(12.5));
@@ -1265,7 +1271,7 @@ fn todo_section(ui: &mut Ui, core: &Arc<Core>, p: &Pal, s: &mut crate::model::To
                 ui.ctx().copy_text(code.clone());
             }
             if primary(ui, p, "로그인 페이지 열기").clicked() {
-                let _ = std::process::Command::new("explorer.exe").arg(uri).spawn();
+                let _ = crate::proc::start(&crate::proc::windows_exe("explorer.exe"), &[std::ffi::OsStr::new(uri.as_str())], false);
             }
             if ghost(ui, p, "취소").clicked() {
                 core.todo.lock().unwrap().pending = None;

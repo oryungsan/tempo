@@ -31,6 +31,10 @@ pub struct StartOpts {
     pub new_alarm: bool,
     pub focus: Option<String>,
     pub open: Option<String>,
+    /// 시험용 (시험 모드에서만): 치료실 창 열기 — bed:<번호> · bed-presets · board-bed:<번호>
+    pub test_open: Option<String>,
+    /// 시험용 (시험 모드에서만): test_open 으로 연 그 창을 N초(1~3600) 뒤 닫음 (편집 취소와 같음)
+    pub close_after: Option<u64>,
 }
 
 pub struct App {
@@ -45,6 +49,13 @@ pub struct App {
     /// 메인 창 제목 표시줄 색을 맞춘 테마 (창이 새로 열리면 None)
     titlebar: Option<Theme>,
     last_frame: Option<std::time::Instant>,
+    /// 시험용 (--close-after): 이 시각에 시험으로 연 치료실 창(보드 창 여부, 창 번호)만 닫기
+    test_close_at: Option<(std::time::Instant, Vec<(bool, u64)>)>,
+}
+
+/// 시험용 — 창을 띄워도 포커스를 가져가지 않음 (시험 모드 + TEMPO_TEST_INACTIVE=1, 사용 중인 PC 에서 시험할 때)
+pub(crate) fn test_inactive() -> bool {
+    crate::store::test_mode() && std::env::var("TEMPO_TEST_INACTIVE").as_deref() == Ok("1")
 }
 
 fn main_vid() -> ViewportId {
@@ -100,11 +111,35 @@ impl App {
             }
             _ => {}
         }
+        // 치료실 창 (업데이트 대기 시험, **시험 모드에서만** — main.rs 가 걸러 줌): bed:<번호> = 베드 조작 창,
+        // bed-presets = 치료 프로그램 편집, board-bed:<번호> = 보드 창의 베드 조작 창 (보드 창은 settings.bed_board 가 켜져 있어야 보임)
+        let mut board: beds::Board = Default::default();
+        let mut opened: Vec<(bool, u64)> = Vec::new();
+        let bed_def = |no: &str| no.parse::<u32>().ok().and_then(|no| core.data().timers.iter().find(|t| t.bed.as_ref().map(|b| b.no) == Some(no)).cloned());
+        match o.test_open.as_deref() {
+            Some("bed-presets") => {
+                main.page = main_win::Page::Beds;
+                opened.push((false, main.beds.test_open(&core, None)));
+            }
+            Some(x) if x.starts_with("bed:") => {
+                if let Some(d) = bed_def(&x[4..]) {
+                    main.page = main_win::Page::Beds;
+                    opened.push((false, main.beds.test_open(&core, Some(&d))));
+                }
+            }
+            Some(x) if x.starts_with("board-bed:") => {
+                if let Some(d) = bed_def(&x[10..]) {
+                    opened.push((true, board.test_open(&d)));
+                }
+            }
+            _ => {}
+        }
+        let test_close_at = o.close_after.filter(|_| !opened.is_empty()).and_then(|s| std::time::Instant::now().checked_add(std::time::Duration::from_secs(s))).map(|t| (t, opened));
         if o.new_alarm {
             main.page = main_win::Page::Alarms;
             main.alarm_edit = Some(editor::AlarmEdit::new(crate::model::AlarmDef::new(), true));
         }
-        App { core, main_open: o.show_main, main, cards: HashMap::new(), ev_cards: HashMap::new(), board: Default::default(), _tray: tray, theme: None, titlebar: None, last_frame: None }
+        App { core, main_open: o.show_main, main, cards: HashMap::new(), ev_cards: HashMap::new(), board, _tray: tray, theme: None, titlebar: None, last_frame: None, test_close_at }
     }
 
     fn default_card_pos(&self, stack_y: f32, k: f32, style: crate::model::Style) -> egui::Pos2 {
@@ -168,6 +203,7 @@ impl eframe::App for App {
         if self.main_open {
             let size = settings.main_size.unwrap_or([980.0, 680.0]);
             let mut b = egui::ViewportBuilder::default()
+                .with_active(!test_inactive())
                 .with_title("Tempo")
                 .with_inner_size(size)
                 .with_min_inner_size([780.0, 540.0])
@@ -260,16 +296,23 @@ impl eframe::App for App {
         self.ev_cards.retain(|key, _| ev_shown.contains(key));
 
         // 치료실 보드 창
-        if settings.bed_board && main_win::page_visible(&core, main_win::Page::Beds) && !beds::board(ctx, &core, &mut self.board, &p) {
+        let board_on = settings.bed_board && main_win::page_visible(&core, main_win::Page::Beds);
+        if board_on && !beds::board(ctx, &core, &mut self.board, &p) {
             core.update_quiet(|d| d.settings.bed_board = false);
         }
         ring::show(ctx, &core, &p);
         fx::edge(ctx, &core, &defs, &views, &p);
         let fx_live = fx::any_live(&core, &defs, &views);
 
-        // 업데이트 판단용: 편집 창 · 스톱워치 · 메인 창
+        if self.test_close_at.as_ref().is_some_and(|(t, _)| std::time::Instant::now() >= *t) {
+            if let Some((_, opened)) = self.test_close_at.take() {
+                let n = opened.iter().filter(|(board, g)| if *board { self.board.test_close(*g) } else { self.main.beds.test_close(*g) }).count();
+                crate::store::log(format!("test: closed {n} test-opened bed window(s) (--close-after)"));
+            }
+        }
+        // 업데이트 판단용: 편집 창(치료실 베드 조작 · 치료 프로그램 · 보드 창 포함) · 스톱워치 · 메인 창
         let m = &self.main;
-        let hold = m.sw.running() || m.timer_edit.is_some() || m.alarm_edit.is_some() || m.rem.edit.is_some() || m.clk.editing();
+        let hold = m.sw.running() || m.timer_edit.is_some() || m.alarm_edit.is_some() || m.rem.edit.is_some() || m.clk.editing() || m.beds.editing() || (board_on && self.board.editing());
         core.ui_hold.store(hold, std::sync::atomic::Ordering::Relaxed);
         core.main_visible.store(self.main_open, std::sync::atomic::Ordering::Relaxed);
         // 초 단위로 바뀌는 화면 (카운트다운 · 월드타임) · 사이드바 고정 카운트다운

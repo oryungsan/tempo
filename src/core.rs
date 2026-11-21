@@ -78,6 +78,30 @@ struct AlarmRt {
     snooze: Option<DateTime<Local>>,
     /// 이 PC 에서 마지막으로 울린 시각 (연동: 다른 PC 가 먼저 울리고 끈 일회성 알람 판단)
     rang: Option<DateTime<Local>>,
+    /// `next` 를 계산할 때의 알람 시각 · 요일 · 켬 — 이게 바뀐 알람만 다시 계산 (껐다 켜면 다시 계산)
+    sig: Option<AlarmSig>,
+}
+
+type AlarmSig = (u32, u32, [bool; 7], bool);
+
+fn alarm_sig(a: &AlarmDef) -> AlarmSig {
+    (a.hour, a.minute, a.days, a.enabled)
+}
+
+/// 업데이트 넘기기 파일 — 옛 프로세스가 쓰고 새(또는 되돌린) 프로세스가 읽음
+pub fn handover_path() -> std::path::PathBuf {
+    store::dir().join("update-runs.json")
+}
+
+/// 이 프로세스가 어떻게 켜졌나 (넘기기 파일 처리)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Handover {
+    /// 보통 실행
+    Normal,
+    /// --after-update: 업데이트로 새로 켜짐
+    AfterUpdate,
+    /// --after-rollback: 새 버전이 망가져 옛 버전으로 되돌려 켜짐
+    AfterRollback,
 }
 
 pub struct Core {
@@ -102,6 +126,10 @@ pub struct Core {
     pub update_state: Mutex<crate::update::UpdateState>,
     /// 화면 쪽이 바쁨 (편집 창 열림 · 스톱워치) — 업데이트 미룸
     pub ui_hold: AtomicBool,
+    /// 업데이트 교체 중 — 진행 상태를 저장한 뒤 바뀐 것은 새 버전에 안 넘어가므로 상태 변경을 받지 않음
+    frozen: AtomicBool,
+    /// 이번 실행이 이어받은 넘기기 (예정 수, 이어받은 수) — /api/update 로 감시에게
+    pub handover: Mutex<Option<(usize, usize)>>,
     /// 메인 창이 열려 있음 — 업데이트 후 다시 열기
     pub main_visible: AtomicBool,
     /// 끝나기 전 화면 효과 미리 보기 (타이머, 시작, 효과들)
@@ -146,6 +174,8 @@ impl Core {
             fx_preview: Mutex::new(None),
             update_state: Mutex::new(Default::default()),
             ui_hold: AtomicBool::new(false),
+            frozen: AtomicBool::new(false),
+            handover: Mutex::new(None),
             main_visible: AtomicBool::new(false),
             rem_fired: Mutex::new(HashMap::new()),
             hidden_cards: Mutex::new(HashSet::new()),
@@ -180,12 +210,32 @@ impl Core {
 
     // ── 데이터 ─────────────────────────────────────────────
 
+    /// 업데이트 교체 시작 · 실패로 풀기 (update.rs 만)
+    pub fn freeze(&self, on: bool) {
+        self.frozen.store(on, Ordering::SeqCst);
+        if on {
+            log("update: freezing changes for handover");
+        }
+    }
+
+    /// 교체 중이면 true + 기록 (그 변경은 버림 — PC 연동 변경은 다시 연결할 때 상대가 다시 보냄)
+    fn refuse(&self, what: &str) -> bool {
+        let f = self.frozen.load(Ordering::SeqCst);
+        if f {
+            log(format!("update in progress — ignored {what}"));
+        }
+        f
+    }
+
     pub fn data(&self) -> MutexGuard<'_, Data> {
         self.data.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// 데이터 바꾸기 → 저장 · 실행 상태 맞추기 · 단축키 다시 등록
     pub fn update(&self, f: impl FnOnce(&mut Data)) {
+        if self.refuse("change") {
+            return;
+        }
         let hk_before = self.hotkey_sig();
         let (before, after) = {
             let mut d = self.data();
@@ -204,6 +254,9 @@ impl Core {
 
     /// 창 위치처럼 자주 바뀌는 값 — 저장만
     pub fn update_quiet(&self, f: impl FnOnce(&mut Data)) {
+        if self.refuse("quiet change") {
+            return;
+        }
         let (before, after) = {
             let mut d = self.data();
             let before = crate::sync::items(&d);
@@ -221,7 +274,8 @@ impl Core {
         self.rt.lock().unwrap().get(&id).map(|e| e.snapshot(Instant::now(), crate::sync::now_ms()))
     }
 
-    /// 업데이트 직전: 모든 타이머 진행 상태 저장 (새 버전이 이어받음)
+    /// 업데이트 직전: 모든 타이머 진행 상태 저장 (새 버전이 이어받음).
+    /// 임시 파일에 쓰고 다시 읽어 확인한 뒤 이름 바꾸기 — 실패하면 false (업데이트는 교체를 멈춤)
     pub fn save_runs_for_update(&self) -> bool {
         let now_ms = crate::sync::now_ms();
         let now = Instant::now();
@@ -233,22 +287,54 @@ impl Core {
             .filter(|(_, e)| e.phase != Phase::Idle)
             .map(|(id, e)| (id.to_string(), serde_json::json!({ "snap": e.snapshot(now, now_ms), "remote": crate::sync::remote_run(*id), "rev": crate::sync::run_rev(*id) })))
             .collect();
-        let j = serde_json::json!({ "saved_ms": now_ms, "runs": runs });
-        let ok = std::fs::write(store::dir().join("update-runs.json"), j.to_string()).is_ok();
-        log(format!("update: saved {} running timer(s) for handover", runs.len()));
-        ok
+        // count = 새 버전이 이어받아야 할 수 — 감시가 새 버전의 /api/update 와 맞춰 봄
+        let text = serde_json::json!({ "saved_ms": now_ms, "count": runs.len(), "runs": runs }).to_string();
+        let (path, tmp) = (handover_path(), store::dir().join("update-runs.json.tmp"));
+        let r = std::fs::write(&tmp, &text)
+            .and_then(|_| std::fs::read_to_string(&tmp))
+            .and_then(|back| if back == text { Ok(()) } else { Err(std::io::Error::other("다시 읽은 내용이 다름")) })
+            .and_then(|_| std::fs::rename(&tmp, &path));
+        match r {
+            Ok(()) => {
+                log(format!("update: saved {} running timer(s) for handover", runs.len()));
+                true
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                log(format!("update: saving running timers failed: {e}"));
+                false
+            }
+        }
     }
 
-    /// 시작할 때: 업데이트(또는 되돌리기) 직전 진행 상태가 있으면 이어받음 (2분 안에 저장된 것만)
-    pub fn restore_runs_after_update(&self) {
-        let path = store::dir().join("update-runs.json");
-        let Ok(t) = std::fs::read_to_string(&path) else { return };
-        let _ = std::fs::remove_file(&path);
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else { return };
+    /// 시작할 때: 업데이트(또는 되돌리기) 직전 진행 상태 이어받기 (2분 안에 저장된 것만).
+    /// - AfterUpdate: 이어받고 파일은 남김 — 새 버전이 망가져 되돌리면 옛 버전도 같은 파일을 읽음.
+    ///   감시(--update-watch)가 새 버전 정상을 확인하면 지움
+    /// - AfterRollback: 이어받고 지움
+    /// - Normal(보통 실행): 이어받지 않음 — 남은 파일은 옛 상태라 지움
+    /// 반환 = 이어받은 수 (None = 파일 없음 · 이어받지 않음)
+    pub fn restore_runs_after_update(&self, mode: Handover) -> Option<usize> {
+        let path = handover_path();
+        let t = std::fs::read_to_string(&path).ok()?;
+        if mode == Handover::Normal {
+            let _ = std::fs::remove_file(&path);
+            log("update: leftover handover file — ignored (normal start)");
+            return None;
+        }
+        let v = match serde_json::from_str::<serde_json::Value>(&t) {
+            Ok(v) => v,
+            Err(e) => {
+                log(format!("update: handover file unreadable ({e}) — ignored"));
+                let _ = std::fs::remove_file(&path);
+                return None;
+            }
+        };
         let now_ms = crate::sync::now_ms();
-        if now_ms - v["saved_ms"].as_i64().unwrap_or(0) > 120_000 {
-            log("update: handover file too old — ignored");
-            return;
+        let age = now_ms - v["saved_ms"].as_i64().unwrap_or(0);
+        if !(-5_000..=120_000).contains(&age) {
+            log(format!("update: handover file too old ({}s) — ignored", age / 1000));
+            let _ = std::fs::remove_file(&path);
+            return None;
         }
         let now = Instant::now();
         let mut n = 0;
@@ -263,12 +349,25 @@ impl Core {
                 }
             }
         }
-        log(format!("update: restored {n} running timer(s)"));
+        let expected = v["count"].as_u64().map(|c| c as usize).unwrap_or_else(|| v["runs"].as_object().map(|m| m.len()).unwrap_or(0));
+        *self.handover.lock().unwrap() = Some((expected, n));
+        if n == expected {
+            log(format!("update: restored {n} running timer(s)"));
+        } else {
+            log(format!("update: restored only {n} of {expected} running timer(s)"));
+        }
+        if mode == Handover::AfterRollback {
+            let _ = std::fs::remove_file(&path);
+        }
         self.repaint();
+        Some(n)
     }
 
     /// 다른 PC 에서 온 변경 — 다시 보내지 않음
     pub fn apply_remote(&self, items: &[(String, Option<serde_json::Value>)], runs: &[(Id, crate::engine::Snap)], now_ms: i64) -> Vec<String> {
+        if self.refuse("change from other PC") {
+            return vec![];
+        }
         let hk_before = self.hotkey_sig();
         let alarms_before: Vec<AlarmDef> = self.data().alarms.clone();
         let mut failed = Vec::new();
@@ -413,7 +512,7 @@ impl Core {
             })
             .collect();
         // 잠금 순서 = data → rt (view() 와 같게). data 는 여기서 먼저 다 읽어 둔다
-        let alarms: Vec<Id> = self.data().alarms.iter().map(|a| a.id).collect();
+        let alarms: Vec<(Id, AlarmSig)> = self.data().alarms.iter().map(|a| (a.id, alarm_sig(a))).collect();
         let mut rt = self.rt.lock().unwrap();
         rt.retain(|id, _| timers.iter().any(|t| t.0 == *id));
         for (id, durs, o) in timers {
@@ -430,10 +529,15 @@ impl Core {
         }
         drop(rt);
         let mut art = self.alarm_rt.lock().unwrap();
-        art.retain(|id, _| alarms.contains(id));
-        // 설정이 바뀌었을 수 있으니 다음 시각은 다시 계산
-        for r in art.values_mut() {
-            r.next = None;
+        art.retain(|id, _| alarms.iter().any(|(a, _)| a == id));
+        // 시각 · 요일이 바뀐 알람만 다음 시각을 다시 계산. 전부 지우면 알람 시각을 막 지난 순간
+        // 다른 변경(베드 · 타이머 · 연동)이 끼었을 때 now−1초 뒤로 다시 계산해 이번 알람을 건너뜀
+        for (id, sig) in &alarms {
+            if let Some(r) = art.get_mut(id) {
+                if r.sig.as_ref() != Some(sig) {
+                    r.next = None;
+                }
+            }
         }
     }
 
@@ -469,6 +573,9 @@ impl Core {
     // ── 타이머 ─────────────────────────────────────────────
 
     pub fn cmd(&self, id: Id, c: Cmd, src: &str) {
+        if self.refuse(&format!("{c:?} ({src})")) {
+            return;
+        }
         let ev = match self.rt.lock().unwrap().get_mut(&id) {
             Some(e) => e.command(c, Instant::now()),
             None => return,
@@ -813,8 +920,10 @@ impl Core {
         }
         let mut art = self.alarm_rt.lock().unwrap();
         let r = art.entry(id).or_default();
-        if r.next.is_none() {
-            r.next = alarm::next_fire(&a, Local::now());
+        // tick_alarms 와 같은 기준 (화면이 먼저 계산해도 막 지난 알람을 건너뛰지 않게)
+        if r.next.is_none() || r.sig != Some(alarm_sig(&a)) {
+            r.next = alarm::next_fire(&a, Local::now() - chrono::Duration::seconds(1));
+            r.sig = Some(alarm_sig(&a));
         }
         match (r.next, r.snooze) {
             (Some(n), Some(s)) => Some(n.min(s)),
@@ -1203,8 +1312,12 @@ impl Core {
             let mut art = self.alarm_rt.lock().unwrap();
             for a in &alarms {
                 let r = art.entry(a.id).or_default();
+                if r.sig != Some(alarm_sig(a)) {
+                    r.next = None;
+                }
                 if r.next.is_none() {
                     r.next = alarm::next_fire(a, now - chrono::Duration::seconds(1));
+                    r.sig = Some(alarm_sig(a));
                 }
                 let mut due = false;
                 if let Some(n) = r.next {
@@ -1353,14 +1466,150 @@ mod bed_tests {
         let before = a.view(id).unwrap().total_rem;
         assert!(a.save_runs_for_update());
         // 새 버전 = 같은 데이터로 새로 켜짐 → 이어받음
-        let b = Core::new(data, (0.0, 0.0, 1920.0, 1080.0), (0.0, 0.0, 1920.0, 1080.0));
+        let b = Core::new(data.clone(), (0.0, 0.0, 1920.0, 1080.0), (0.0, 0.0, 1920.0, 1080.0));
         assert_eq!(b.view(id).unwrap().phase, Phase::Idle);
-        b.restore_runs_after_update();
+        assert_eq!(b.restore_runs_after_update(Handover::AfterUpdate), Some(1));
+        assert_eq!(*b.handover.lock().unwrap(), Some((1, 1)), "감시에게 알릴 (예정, 이어받음)");
         let v = b.view(id).unwrap();
         assert_eq!(v.phase, Phase::Running);
         assert!((v.total_rem.as_secs_f32() - before.as_secs_f32()).abs() < 0.5, "{:?} vs {:?}", v.total_rem, before);
-        // 파일은 한 번만
+        // 새 버전이 망가져 되돌리면 옛 버전도 같은 파일을 읽음 (감시가 정상을 확인하기 전엔 남아 있음)
+        assert!(dir.join("update-runs.json").exists());
+        let c = Core::new(data.clone(), (0.0, 0.0, 1920.0, 1080.0), (0.0, 0.0, 1920.0, 1080.0));
+        assert_eq!(c.restore_runs_after_update(Handover::AfterRollback), Some(1));
+        assert_eq!(c.view(id).unwrap().phase, Phase::Running);
         assert!(!dir.join("update-runs.json").exists());
+        // 보통 실행은 남은 파일을 이어받지 않고 지움 (옛 상태로 타이머가 다시 돌지 않게)
+        assert!(a.save_runs_for_update());
+        let d = Core::new(data, (0.0, 0.0, 1920.0, 1080.0), (0.0, 0.0, 1920.0, 1080.0));
+        assert_eq!(d.restore_runs_after_update(Handover::Normal), None);
+        assert_eq!(d.view(id).unwrap().phase, Phase::Idle);
+        assert!(!dir.join("update-runs.json").exists());
+        // 못 쓰면 false (업데이트는 교체를 멈춤) — 임시 파일 자리에 폴더를 두어 쓰기 실패 흉내
+        std::fs::create_dir_all(dir.join("update-runs.json.tmp")).unwrap();
+        assert!(!a.save_runs_for_update());
+        assert!(!dir.join("update-runs.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unrelated_change_keeps_due_alarm() {
+        // 알람 시각을 넘긴 뒤 tick 전에 다른 변경(베드 · 타이머 · 연동)이 끼어도 이번 알람을 놓치지 않음
+        use chrono::Timelike;
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("tempo-alarm-{}", std::process::id()));
+        std::env::set_var("TEMPO_DIR", &dir);
+        let due = Local::now() - chrono::Duration::minutes(10); // 절전 복귀 등으로 tick 이 늦은 상황
+        let mut a = AlarmDef::new();
+        a.hour = due.hour();
+        a.minute = due.minute();
+        a.days = [true; 7];
+        a.sound = "none".into();
+        let aid = a.id;
+        let core = Core::new(Data { timers: vec![], alarms: vec![a.clone()], ..Data::seed() }, (0.0, 0.0, 1920.0, 1080.0), (0.0, 0.0, 1920.0, 1080.0));
+        // 마지막 tick 때 계산해 둔 다음 시각 = 그 알람 (이미 지남, 30분 안)
+        let at = alarm::next_fire(&a, due - chrono::Duration::minutes(1)).unwrap();
+        {
+            let mut art = core.alarm_rt.lock().unwrap();
+            let r = art.entry(aid).or_default();
+            r.next = Some(at);
+            r.sig = Some(alarm_sig(&a));
+        }
+        core.ensure_beds(2); // 알람과 무관한 변경
+        core.tick_alarms();
+        assert!(core.rings().iter().any(|r| r.0 == RingKind::Alarm(aid)), "알람이 울려야 함");
+        // 알람 자체를 바꾸면 다시 계산 (옛 시각으로 울리지 않음)
+        core.dismiss(RingKind::Alarm(aid));
+        core.alarm_rt.lock().unwrap().get_mut(&aid).unwrap().next = Some(at);
+        let mut b = a.clone();
+        b.hour = (due.hour() + 12) % 24;
+        core.upsert_alarm(b);
+        core.tick_alarms();
+        assert!(!core.rings().iter().any(|r| r.0 == RingKind::Alarm(aid)), "바뀐 알람은 옛 시각으로 울리면 안 됨");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn broken_data_recovers_without_examples() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("tempo-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("TEMPO_DIR", &dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 정상 파일 → 켤 때 백업
+        let good = Data { timers: vec![TimerDef::simple("백업", 60, "#5B8DEF")], ..Data::seed() };
+        assert!(store::save(&good));
+        let (d, note) = store::load();
+        assert!(note.is_none() && d.timers.len() == 1);
+        assert!(dir.join("data.json.bak").exists());
+        // 깨짐 → 보관 + 백업에서 복구
+        std::fs::write(store::data_path(), "{ 깨진").unwrap();
+        let (d, note) = store::load();
+        assert_eq!(d.timers.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), vec!["백업"]);
+        assert!(note.unwrap().contains("복구"));
+        assert!(std::fs::read_dir(&dir).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("data.broken-")));
+        // 복구할 것도 없음 → 예시 타이머(Ctrl+Alt+F9 단축키) 없이 빈 데이터
+        std::fs::write(store::data_path(), "{ 깨진").unwrap();
+        let _ = std::fs::remove_file(dir.join("data.json.bak"));
+        let (d, _) = store::load();
+        assert!(d.timers.is_empty() && d.world.is_empty());
+        // 주 파일이 없어도(깨진 파일 보관 뒤 복구본 저장 실패 · 저장 중 끊김) 백업 · 임시 파일에서 복구
+        assert!(store::save(&good));
+        let _ = store::load(); // 정상 → 백업 만듦
+        std::fs::remove_file(store::data_path()).unwrap();
+        let (d, note) = store::load();
+        assert_eq!(d.timers.len(), 1, "백업에서 복구해야 함");
+        assert!(note.unwrap().contains("data.json 없음"));
+        std::fs::remove_file(dir.join("data.json.bak")).unwrap();
+        std::fs::write(dir.join("data.json.tmp"), serde_json::to_string(&good).unwrap()).unwrap();
+        let (d, _) = store::load();
+        assert_eq!(d.timers.len(), 1, "임시 파일에서 복구해야 함");
+        // 흔적은 있는데 읽을 복구본이 없음 → 예시 없이 빈 데이터 (처음 실행이 아님)
+        std::fs::write(dir.join("data.json.tmp"), "{ 깨진").unwrap();
+        let (d, _) = store::load();
+        assert!(d.timers.is_empty());
+        // 정말 처음 (아무 흔적 없음) → 예시
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (d, note) = store::load();
+        assert!(!d.timers.is_empty() && note.unwrap().starts_with("first run"));
+        // 저장 실패는 false (이름 바꾸기 자리에 폴더)
+        let _ = std::fs::remove_file(store::data_path());
+        std::fs::create_dir_all(store::data_path()).unwrap();
+        assert!(!store::save(&good));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_hooks_only_in_test_mode_and_close_only_their_window() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("tempo-testmode-{}", std::process::id()));
+        std::env::set_var("TEMPO_DIR", &dir);
+        std::env::remove_var("TEMPO_TEST");
+        assert!(!store::test_mode(), "TEMPO_TEST 없으면 시험 모드 아님");
+        std::env::set_var("TEMPO_TEST", "1");
+        assert!(store::test_mode());
+        // 실제 데이터 폴더를 가리키면 TEMPO_TEST=1 이어도 시험 모드 아님
+        let real = std::path::PathBuf::from(std::env::var_os("APPDATA").unwrap()).join("Tempo");
+        std::env::set_var("TEMPO_DIR", &real);
+        assert!(!store::test_mode());
+        std::env::set_var("TEMPO_DIR", format!("{}\\", real.display()).to_uppercase());
+        assert!(!store::test_mode(), "대소문자 · 끝 역슬래시가 달라도 실제 폴더");
+        std::env::remove_var("TEMPO_TEST");
+        std::env::set_var("TEMPO_DIR", &dir);
+        // 자동 닫기는 시험으로 연 그 창만 — 사람이 닫고 다시 연 창 · 다른 창은 그대로
+        let core = Core::new(Data { timers: vec![], ..Data::seed() }, (0.0, 0.0, 1920.0, 1080.0), (0.0, 0.0, 1920.0, 1080.0));
+        core.ensure_beds(2);
+        let def = core.data().timers.iter().find(|t| t.bed.is_some()).cloned().unwrap();
+        let mut st = crate::ui::beds::BedState::default();
+        let g = st.test_open(&core, Some(&def));
+        let reopened = st.test_open(&core, Some(&def)); // 사람이 닫고 다시 연 것과 같음 (새 창)
+        assert_ne!(g, reopened);
+        assert!(!st.test_close(g) && st.editing(), "옛 번호로는 새 창을 닫지 않음");
+        assert!(st.test_close(reopened) && !st.editing());
+        let p = st.test_open(&core, None);
+        assert!(!st.test_close(reopened) && st.editing());
+        assert!(st.test_close(p));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

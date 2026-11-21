@@ -24,9 +24,19 @@ fn d_label(days: i64) -> String {
     }
 }
 
-/// 그해의 (월, 일) — 2월 29일은 평년엔 2월 28일
-fn on_year(base: NaiveDate, year: i32) -> NaiveDate {
-    NaiveDate::from_ymd_opt(year, base.month(), base.day()).unwrap_or_else(|| NaiveDate::from_ymd_opt(year, 2, 28).unwrap())
+/// 그해의 (월, 일) — 2월 29일은 평년엔 2월 28일. 표현할 수 없는 해면 None
+fn on_year(base: NaiveDate, year: i32) -> Option<NaiveDate> {
+    NaiveDate::from_ymd_opt(year, base.month(), base.day()).or_else(|| NaiveDate::from_ymd_opt(year, 2, 28))
+}
+
+/// 날짜 ± 일 — 넘치면 None (chrono 의 + / − 는 넘치면 panic → release 는 앱 전체가 꺼짐)
+fn add_days(d: NaiveDate, n: i64) -> Option<NaiveDate> {
+    d.checked_add_signed(chrono::TimeDelta::try_days(n)?)
+}
+
+/// 검색 끝 날짜 — 넘치면 달력 끝까지
+fn add_days_sat(d: NaiveDate, n: i64) -> NaiveDate {
+    add_days(d, n).unwrap_or(if n >= 0 { NaiveDate::MAX } else { NaiveDate::MIN })
 }
 
 pub fn info(d: &Dday, today: NaiveDate) -> Option<DdayInfo> {
@@ -47,14 +57,14 @@ pub fn info(d: &Dday, today: NaiveDate) -> Option<DdayInfo> {
                 DdayInfo { big: d_label(days), small: "시작 전".into(), target: date, days, next: None }
             } else {
                 let n = -days + 1;
-                let next = events(d, today, today + chrono::Duration::days(1100)).into_iter().next().map(|(n, dt)| (n, dt, (dt - today).num_days()));
+                let next = events(d, today, add_days_sat(today, 1100)).into_iter().next().map(|(n, dt)| (n, dt, (dt - today).num_days()));
                 DdayInfo { big: format!("{n}일째"), small: d_label(days), target: date, days, next }
             }
         }
         DdayMode::Yearly => {
-            let mut next = on_year(date, today.year());
+            let mut next = on_year(date, today.year())?;
             if next < today {
-                next = on_year(date, today.year() + 1);
+                next = on_year(date, today.year().checked_add(1)?)?;
             }
             let days = (next - today).num_days();
             let k = next.year() - date.year();
@@ -76,7 +86,7 @@ pub fn events(d: &Dday, from: NaiveDate, to: NaiveDate) -> Vec<(String, NaiveDat
         }
         DdayMode::Yearly => {
             for y in from.year().max(date.year())..=to.year() {
-                let e = on_year(date, y);
+                let Some(e) = on_year(date, y) else { continue };
                 if e >= from && e <= to {
                     let k = y - date.year();
                     v.push((if k > 0 { format!("{k}번째") } else { "그날".into() }, e));
@@ -89,7 +99,7 @@ pub fn events(d: &Dday, from: NaiveDate, to: NaiveDate) -> Vec<(String, NaiveDat
                 let first = ((from - date).num_days() + 1).max(1);
                 let mut n = (first + step - 1) / step * step;
                 loop {
-                    let e = date + chrono::Duration::days(n - 1);
+                    let Some(e) = add_days(date, n - 1) else { break };
                     if e > to {
                         break;
                     }
@@ -132,9 +142,10 @@ pub fn due_alerts(d: &Dday, now: NaiveDateTime) -> Vec<Alert> {
     let max = rules.iter().map(|r| r.before).max().unwrap_or(0) as i64;
     let today = now.date();
     let mut out = Vec::new();
-    for (label, e) in events(d, today - chrono::Duration::days(1), today + chrono::Duration::days(max + 1)) {
+    for (label, e) in events(d, add_days_sat(today, -1), add_days_sat(today, max + 1)) {
         for r in &rules {
-            let at = (e - chrono::Duration::days(r.before as i64)).and_time(r.naive());
+            let Some(day) = add_days(e, -(r.before as i64)) else { continue };
+            let at = day.and_time(r.naive());
             if at <= now && now - at < chrono::Duration::hours(12) {
                 out.push(Alert { key: format!("{e}/{}@{}", r.before, r.time), at, label: label.clone(), date: e, before: r.before });
             }
@@ -152,15 +163,16 @@ pub fn next_alert(d: &Dday, now: NaiveDateTime) -> Option<Alert> {
     let max = rules.iter().map(|r| r.before).max()? as i64;
     let today = now.date();
     let mut best: Option<Alert> = None;
-    for (label, e) in events(d, today, today + chrono::Duration::days(max + 1100)) {
+    for (label, e) in events(d, today, add_days_sat(today, max + 1100)) {
         for r in &rules {
-            let at = (e - chrono::Duration::days(r.before as i64)).and_time(r.naive());
+            let Some(day) = add_days(e, -(r.before as i64)) else { continue };
+            let at = day.and_time(r.naive());
             if at > now && best.as_ref().map(|b| at < b.at).unwrap_or(true) {
                 best = Some(Alert { key: format!("{e}/{}@{}", r.before, r.time), at, label: label.clone(), date: e, before: r.before });
             }
         }
         // 날짜순이라 이미 찾았고 그날이 그보다 뒤면 그만
-        if best.as_ref().map(|b| e > b.at.date() + chrono::Duration::days(max)).unwrap_or(false) {
+        if best.as_ref().map(|b| e > add_days_sat(b.at.date(), max)).unwrap_or(false) {
             break;
         }
     }
@@ -236,6 +248,51 @@ mod tests {
 
     fn dd(date: NaiveDate, mode: DdayMode) -> Dday {
         Dday::new("t", date, mode, "#5B8DEF")
+    }
+
+    #[test]
+    fn calendar_edges_do_not_panic() {
+        // 달력 양 끝 날짜 · 모든 방식 · 새/옛 알림 형식 — 화면 · 알림 계산이 넘쳐도 꺼지지 않음
+        let max = NaiveDate::MAX;
+        let min = NaiveDate::MIN;
+        let near = |d: NaiveDate, k: i64| add_days(d, k).unwrap();
+        for date in [max, near(max, -1), near(max, -50), min, near(min, 1), nd(2024, 2, 29)] {
+            for mode in [DdayMode::Until, DdayMode::Since, DdayMode::Yearly] {
+                for today in [max, near(max, -3), min, near(min, 3), nd(2026, 11, 21)] {
+                    for old_style in [false, true] {
+                        let mut d = dd(date, mode);
+                        assert_eq!(d.date_nd(), Some(date), "저장 문자열 {} 이 그대로 읽혀야 극단 날짜를 시험함", d.date);
+                        d.notify = true;
+                        d.yearly_ms = true;
+                        if old_style {
+                            d.alerts.clear();
+                            d.remind = vec![1, 7, 30];
+                        } else {
+                            d.alerts = vec![crate::model::AlertRule::new(0, "09:00"), crate::model::AlertRule::new(365, "07:30")];
+                        }
+                        let now = today.and_hms_opt(23, 59, 0).unwrap();
+                        let i = info(&d, today);
+                        let _ = events(&d, near(today, 0), add_days_sat(today, 1100));
+                        let _ = due_alerts(&d, now);
+                        let _ = next_alert(&d, now);
+                        if let Some(i) = i {
+                            let _ = soon(&d, &i, now);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn absurd_before_does_not_panic() {
+        // 깨진 파일 · 다른 PC 에서 온 값 — 날짜 계산이 넘치면 앱 전체가 꺼짐 (panic = abort)
+        let mut d = dd(nd(2026, 12, 25), DdayMode::Until);
+        d.notify = true;
+        d.alerts = vec![crate::model::AlertRule::new(u32::MAX, "09:00")];
+        let now = nd(2026, 11, 20).and_hms_opt(10, 0, 0).unwrap();
+        let _ = due_alerts(&d, now);
+        let _ = next_alert(&d, now);
     }
 
     #[test]

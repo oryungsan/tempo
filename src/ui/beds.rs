@@ -183,6 +183,40 @@ impl Default for BedState {
 }
 
 impl BedState {
+    /// 베드 조작 창 · 치료 프로그램 편집이 열려 있음 (업데이트 대기 — 입력 중인 이름 · 프로그램을 잃지 않게)
+    pub fn editing(&self) -> bool {
+        self.act.is_some() || self.presets.is_some()
+    }
+    /// 시험용 (--open bed:<번호> · bed-presets, 시험 모드에서만) — 연 창의 번호
+    pub fn test_open(&mut self, core: &Core, def: Option<&TimerDef>) -> u64 {
+        match def {
+            Some(d) => {
+                let a = BedAction::new(d);
+                let g = a.gen;
+                self.act = Some(a);
+                g
+            }
+            None => {
+                let e = PresetsEdit::new(core);
+                let g = e.gen;
+                self.presets = Some(e);
+                g
+            }
+        }
+    }
+    /// 시험으로 연 **그 창**만 닫음 (그 사이 사람이 닫았다 다시 연 창 · 다른 창은 그대로)
+    pub fn test_close(&mut self, gen: u64) -> bool {
+        if self.act.as_ref().is_some_and(|a| a.gen == gen) {
+            self.act = None;
+            return true;
+        }
+        if self.presets.as_ref().is_some_and(|e| e.gen == gen) {
+            self.presets = None;
+            return true;
+        }
+        false
+    }
+
     pub fn modals(&mut self, ctx: &egui::Context, core: &Arc<Core>, p: &Pal) {
         if let Some(a) = self.act.as_mut() {
             if let Outcome::Close = a.ui(ctx, core, p) {
@@ -246,6 +280,8 @@ pub fn page(ui: &mut Ui, core: &Arc<Core>, st: &mut BedState, p: &Pal) {
 // ── 베드 누르면 뜨는 창 ─────────────────────────────────────
 
 pub struct BedAction {
+    /// 창마다 고유 번호 (시험 자동 닫기가 자기가 연 창만 닫게)
+    gen: u64,
     /// 0 = 베드 수 바꾸기 창
     id: Id,
     patient: String,
@@ -258,11 +294,11 @@ pub struct BedAction {
 impl BedAction {
     pub fn new(def: &TimerDef) -> Self {
         let pat = def.bed.as_ref().map(|b| b.patient.clone()).unwrap_or_default();
-        BedAction { id: def.id, patient: pat.clone(), patient_orig: pat, mins: 15, count: 0, confirm_clear: false }
+        BedAction { gen: next_gen(), id: def.id, patient: pat.clone(), patient_orig: pat, mins: 15, count: 0, confirm_clear: false }
     }
 
     fn count() -> Self {
-        BedAction { id: 0, patient: String::new(), patient_orig: String::new(), mins: 0, count: 0, confirm_clear: false }
+        BedAction { gen: next_gen(), id: 0, patient: String::new(), patient_orig: String::new(), mins: 0, count: 0, confirm_clear: false }
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, core: &Arc<Core>, p: &Pal) -> Outcome {
@@ -477,6 +513,7 @@ impl BedAction {
 // ── 치료 프로그램 편집 ─────────────────────────────────────
 
 pub struct PresetsEdit {
+    gen: u64,
     list: Vec<BedPreset>,
 }
 
@@ -486,7 +523,7 @@ impl PresetsEdit {
         if list.is_empty() {
             list = BedPreset::defaults();
         }
-        PresetsEdit { list }
+        PresetsEdit { gen: next_gen(), list }
     }
 
     fn ui(&mut self, ctx: &egui::Context, core: &Arc<Core>, p: &Pal) -> Outcome {
@@ -589,6 +626,34 @@ pub struct Board {
     full: bool,
 }
 
+impl Board {
+    /// 보드 창의 베드 조작 창이 열려 있음
+    pub fn editing(&self) -> bool {
+        self.act.is_some()
+    }
+    /// 시험용 (--open board-bed:<번호>, 시험 모드에서만) — 연 창의 번호
+    pub fn test_open(&mut self, def: &TimerDef) -> u64 {
+        let a = BedAction::new(def);
+        let g = a.gen;
+        self.act = Some(a);
+        g
+    }
+    /// 시험으로 연 그 창만 닫음
+    pub fn test_close(&mut self, gen: u64) -> bool {
+        if self.act.as_ref().is_some_and(|a| a.gen == gen) {
+            self.act = None;
+            return true;
+        }
+        false
+    }
+}
+
+/// 창 고유 번호
+fn next_gen() -> u64 {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// 보드 창 — 닫으면 false
 pub fn board(ctx: &egui::Context, core: &Arc<Core>, st: &mut Board, p: &Pal) -> bool {
     let mut keep = true;
@@ -596,7 +661,8 @@ pub fn board(ctx: &egui::Context, core: &Arc<Core>, st: &mut Board, p: &Pal) -> 
         .with_title("Tempo 치료실")
         .with_inner_size([1280.0, 760.0])
         .with_min_inner_size([520.0, 360.0])
-        .with_icon(app_icon());
+        .with_icon(app_icon())
+        .with_active(!super::test_inactive());
     let p = *p;
     ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("bed-board"), builder, |ctx, _| {
         if ctx.input(|i| i.viewport().close_requested()) {

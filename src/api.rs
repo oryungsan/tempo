@@ -74,241 +74,286 @@ fn run(core: Arc<Core>) {
     };
     crate::store::log(format!("api listening on {addr}"));
     let json = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json; charset=utf-8"[..]).unwrap();
+    // 기다리는 요청(지금 확인 8초 · 연동 설정 · To Do 연결 …)은 전용 스레드 하나가 받은 순서대로(FIFO) —
+    // 그동안 /status · /api/beds 가 줄 서지 않게. 상태를 바꾸는 느린 명령끼리는 순서 유지, 스레드는 늘지 않음.
+    // 대기열이 차면 바로 503 (기다리게 하지 않음)
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(tiny_http::Request, String)>(SLOW_QUEUE);
+    let worker = {
+        let (core, json) = (core.clone(), json.clone());
+        std::thread::Builder::new()
+            .name("api-slow".into())
+            .spawn(move || {
+                for (req, url) in rx {
+                    respond(req, handle(&core, &url), json.clone());
+                }
+            })
+            .map_err(|e| crate::store::log(format!("api: 느린 요청 스레드를 못 만듦 ({e}) — 차례로 처리")))
+            .is_ok()
+    };
     for req in server.incoming_requests() {
         let url = req.url().to_string();
-        let path = url.split('?').next().unwrap_or("").trim_end_matches('/').to_ascii_lowercase();
-        let q = query(&url);
-        let get = |k: &str| q.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone());
-        let body: Option<serde_json::Value> = match path.as_str() {
-            "" | "/status" => Some(core.status_json(core.automation_id())),
-            "/start" | "/toggle" | "/pause" | "/resume" | "/reset" | "/skip" => {
-                let id = core.automation_id();
-                if let (Some(id), Some(c)) = (id, Cmd::parse(&path[1..])) {
-                    core.cmd(id, c, "api");
+        if worker && slow(&url) {
+            match tx.try_send((req, url)) {
+                Ok(()) => {}
+                Err(std::sync::mpsc::TrySendError::Full((req, _))) => {
+                    let body = serde_json::json!({ "error": "busy — 잠시 뒤 다시" }).to_string();
+                    let _ = req.respond(tiny_http::Response::from_string(body).with_header(json.clone()).with_status_code(503));
                 }
-                Some(core.status_json(id))
+                Err(std::sync::mpsc::TrySendError::Disconnected((req, url))) => respond(req, handle(&core, &url), json.clone()),
             }
-            "/api/timers" => {
-                let ids: Vec<Id> = core.data().timers.iter().map(|t| t.id).collect();
-                Some(serde_json::Value::Array(ids.into_iter().map(|i| core.status_json(Some(i))).collect()))
+        } else {
+            respond(req, handle(&core, &url), json.clone());
+        }
+    }
+}
+
+/// 느린 요청 대기열 크기 (처리 중 하나 + 이만큼 대기)
+const SLOW_QUEUE: usize = 4;
+
+fn respond(req: tiny_http::Request, body: Option<serde_json::Value>, json: tiny_http::Header) {
+    let _ = match body {
+        Some(b) => req.respond(tiny_http::Response::from_string(b.to_string()).with_header(json)),
+        None => req.respond(tiny_http::Response::from_string("not found").with_status_code(404)),
+    };
+}
+
+/// 처리 중에 잠깐 기다리는 요청 — API 스레드를 막지 않게 따로 돌림
+fn slow(url: &str) -> bool {
+    let path = url.split('?').next().unwrap_or("").trim_end_matches('/').to_ascii_lowercase();
+    let has_query = url.split_once('?').map(|(_, q)| !q.is_empty()).unwrap_or(false);
+    matches!(path.as_str(), "/api/update" | "/api/sync" | "/api/todo" | "/api/debug") && has_query
+}
+
+fn handle(core: &Arc<Core>, url: &str) -> Option<serde_json::Value> {
+    let path = url.split('?').next().unwrap_or("").trim_end_matches('/').to_ascii_lowercase();
+    let q = query(url);
+    let get = |k: &str| q.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone());
+    match path.as_str() {
+        "" | "/status" => Some(core.status_json(core.automation_id())),
+        "/start" | "/toggle" | "/pause" | "/resume" | "/reset" | "/skip" => {
+            let id = core.automation_id();
+            if let (Some(id), Some(c)) = (id, Cmd::parse(&path[1..])) {
+                core.cmd(id, c, "api");
             }
-            "/api/timer" => {
-                let id = get("id").and_then(|s| s.parse::<Id>().ok()).or_else(|| {
-                    let n = get("name")?;
-                    core.data().timers.iter().find(|t| t.name == n).map(|t| t.id)
-                });
-                if let (Some(id), Some(c)) = (id, get("do").and_then(|d| Cmd::parse(&d))) {
-                    core.cmd(id, c, "api");
-                }
-                Some(core.status_json(id))
+            Some(core.status_json(id))
+        }
+        "/api/timers" => {
+            let ids: Vec<Id> = core.data().timers.iter().map(|t| t.id).collect();
+            Some(serde_json::Value::Array(ids.into_iter().map(|i| core.status_json(Some(i))).collect()))
+        }
+        "/api/timer" => {
+            let id = get("id").and_then(|s| s.parse::<Id>().ok()).or_else(|| {
+                let n = get("name")?;
+                core.data().timers.iter().find(|t| t.name == n).map(|t| t.id)
+            });
+            if let (Some(id), Some(c)) = (id, get("do").and_then(|d| Cmd::parse(&d))) {
+                core.cmd(id, c, "api");
             }
-            "/api/debug" => {
-                if get("bench").is_some() {
-                    core.frame_ms.lock().unwrap().clear();
-                    core.update_ms.lock().unwrap().clear();
-                    *core.bench_until.lock().unwrap() = Some(std::time::Instant::now() + Duration::from_secs(3));
-                    core.repaint();
-                    std::thread::sleep(Duration::from_millis(3300));
-                }
-                let stat = |v: &Vec<f32>| {
-                    let n = v.len().max(1) as f32;
-                    let mut s = v.clone();
-                    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                    serde_json::json!({
-                        "n": v.len(),
-                        "avg": (v.iter().sum::<f32>() / n * 10.0).round() / 10.0,
-                        "p50": s.get(s.len() / 2).copied().unwrap_or(0.0),
-                        "max": s.last().copied().unwrap_or(0.0),
-                    })
-                };
-                let f = core.frame_ms.lock().unwrap().clone();
-                let u = core.update_ms.lock().unwrap().clone();
-                Some(serde_json::json!({ "frame_interval_ms": stat(&f), "update_ms": stat(&u), "fps": (f.len() as f32 / 3.0).round() }))
-            }
-            "/api/todo" => {
-                match get("do").as_deref() {
-                    Some("connect") => crate::todo::send(crate::todo::Msg::Connect),
-                    Some("sync") => crate::todo::nudge(),
-                    Some("disconnect") => crate::todo::send(crate::todo::Msg::Disconnect),
-                    _ => {}
-                }
-                std::thread::sleep(Duration::from_millis(if get("do").as_deref() == Some("connect") { 2500 } else { 0 }));
-                let st = core.todo.lock().unwrap().clone();
-                let s = core.data().settings.todo.clone();
-                Some(serde_json::json!({
-                    "enabled": s.enabled,
-                    "connected": st.connected,
-                    "account": s.account,
-                    "list": s.list_name,
-                    "pending_code": st.pending.as_ref().map(|p| p.0.clone()),
-                    "uri": st.pending.as_ref().map(|p| p.1.clone()),
-                    "busy": st.busy,
-                    "last_sync": st.last_sync.map(|t| t.to_rfc3339()),
-                    "error": st.last_error,
-                    "reminders": core.data().reminders.len(),
-                }))
-            }
-            "/api/world" => {
-                let utc = chrono::Utc::now();
-                let lo = crate::world::local_offset_min(utc);
-                let list = core.data().world.clone();
-                Some(serde_json::Value::Array(
-                    list.iter()
-                        .map(|w| match crate::world::at(&w.tz, utc, lo) {
-                            Some(t) => serde_json::json!({
-                                "tz": w.tz,
-                                "name": crate::world::display_name(&w.tz, &w.label),
-                                "time": format!("{:02}:{:02}:{:02}", t.hour, t.minute, t.second),
-                                "date": t.date.to_string(),
-                                "utc": crate::world::utc_label(t.utc_min),
-                                "diff": crate::world::diff_label(t.diff_min),
-                                "day": crate::world::day_label(t.day_diff),
-                            }),
-                            None => serde_json::json!({ "tz": w.tz, "error": "unknown time zone" }),
-                        })
-                        .collect(),
-                ))
-            }
-            "/api/countdowns" => {
-                let now = chrono::Local::now().naive_local();
-                let list = core.data().countdowns.clone();
-                Some(serde_json::Value::Array(
-                    list.iter()
-                        .map(|c| {
-                            let rem = c.target_dt().map(|t| (t - now).num_seconds());
-                            serde_json::json!({
-                                "id": c.id.to_string(),
-                                "title": c.title,
-                                "target": c.target,
-                                "remaining": rem,
-                                "remaining_text": rem.filter(|s| *s > 0).map(|s| { let (d, cl) = crate::dday::remain_text(s); format!("{d} {cl}").trim().to_string() }),
-                                "done": rem.map(|s| s <= 0).unwrap_or(false),
-                                "fired": c.fired,
-                            })
-                        })
-                        .collect(),
-                ))
-            }
-            "/api/ddays" => {
-                let today = chrono::Local::now().date_naive();
-                let list = core.data().ddays.clone();
-                Some(serde_json::Value::Array(
-                    list.iter()
-                        .map(|d| {
-                            let i = crate::dday::info(d, today);
-                            serde_json::json!({
-                                "id": d.id.to_string(),
-                                "title": d.title,
-                                "date": d.date,
-                                "mode": format!("{:?}", d.mode).to_lowercase(),
-                                "label": i.as_ref().map(|i| i.big.clone()),
-                                "detail": i.as_ref().map(|i| i.small.clone()),
-                                "target": i.as_ref().map(|i| i.target.to_string()),
-                                "days": i.as_ref().map(|i| i.days),
-                                "next": i.as_ref().and_then(|i| i.next.as_ref()).map(|n| serde_json::json!({ "name": n.0, "date": n.1.to_string(), "days": n.2 })),
-                            })
-                        })
-                        .collect(),
-                ))
-            }
-            "/api/beds" => {
-                if let Some(n) = get("count").and_then(|c| c.parse::<u32>().ok()).filter(|n| (1..=40).contains(n)) {
-                    core.ensure_beds(n);
-                }
-                Some(crate::ui::beds::beds_json(&core))
-            }
-            "/api/bed" => {
-                // ?no=3 (또는 id=) &do=start|clear|pause|resume|toggle|skip|extend &preset=이름 &min=분 &patient=이름
-                let id = get("id").and_then(|s| s.parse::<Id>().ok()).or_else(|| {
-                    let no: u32 = get("no")?.parse().ok()?;
-                    core.data().timers.iter().find(|t| t.bed.as_ref().map(|b| b.no) == Some(no)).map(|t| t.id)
-                });
-                match (id, get("do").as_deref()) {
-                    (Some(id), Some("start")) => {
-                        let patient = get("patient").unwrap_or_default();
-                        let preset = get("preset").and_then(|n| core.data().bed_presets.iter().find(|p| p.name == n).cloned());
-                        match (preset, get("min").and_then(|m| m.parse::<u32>().ok())) {
-                            (Some(p), _) => core.bed_start(id, &p.name, p.steps.clone(), &patient, "api"),
-                            (None, Some(m)) if m > 0 => core.bed_start(id, &format!("{m}분"), vec![crate::model::Step { name: "치료".into(), secs: m * 60, sound: "chime".into() }], &patient, "api"),
-                            _ => {}
-                        }
-                    }
-                    (Some(id), Some("clear")) => core.bed_clear(id, "api"),
-                    // EMR 연결: 환자가 들어옴(시작 안 함) · 나감(끝났거나 시작 안 한 베드만 비움)
-                    (Some(id), Some("patient")) => {
-                        let r = core.bed_set_patient(id, &get("patient").unwrap_or_default(), &get("since").unwrap_or_default(), &get("note").unwrap_or_default(), "api");
-                        crate::store::log(format!("bed api patient: {r}"));
-                    }
-                    (Some(id), Some("vacate")) => {
-                        let r = core.bed_vacate(id, &get("patient").unwrap_or_default(), "api");
-                        crate::store::log(format!("bed api vacate: {r}"));
-                    }
-                    (Some(id), Some("extend")) => core.bed_extend(id, get("min").and_then(|m| m.parse().ok()).unwrap_or(5), "api"),
-                    (Some(id), Some(d)) => {
-                        if let Some(c) = Cmd::parse(d) {
-                            core.cmd(id, c, "api");
-                        }
-                    }
-                    _ => {}
-                }
-                Some(crate::ui::beds::beds_json(&core))
-            }
-            "/api/sync" => {
-                // 설정 바꾸기: ?mode=host|join|off &code= &host= &port= &sound=on|off
-                if get("find").is_some() {
-                    let port = core.data().settings.sync.port;
-                    crate::sync::discover_async(port);
-                    std::thread::sleep(Duration::from_millis(1800));
-                }
-                let (mode, code, host, port, sound) = (get("mode"), get("code"), get("host"), get("port"), get("sound"));
-                if mode.is_some() || code.is_some() || host.is_some() || port.is_some() || sound.is_some() {
-                    core.update(|d| {
-                        let s = &mut d.settings.sync;
-                        match mode.as_deref() {
-                            Some("host") => s.mode = crate::model::SyncMode::Host,
-                            Some("join") => s.mode = crate::model::SyncMode::Join,
-                            Some("off") => s.mode = crate::model::SyncMode::Off,
-                            _ => {}
-                        }
-                        if let Some(c) = code {
-                            s.code = c;
-                        }
-                        if let Some(h) = host {
-                            s.host = h;
-                        }
-                        if let Some(p) = port.and_then(|p| p.parse().ok()) {
-                            s.port = p;
-                        }
-                        if let Some(v) = sound {
-                            s.remote_sound = v == "on" || v == "1" || v == "true";
-                        }
-                    });
-                    std::thread::sleep(Duration::from_millis(2500));
-                }
-                Some(crate::sync::status_json(&core))
-            }
-            "/api/update" => {
-                match get("do").as_deref() {
-                    Some("check") => {
-                        crate::update::nudge();
-                        std::thread::sleep(Duration::from_secs(8));
-                    }
-                    Some("apply") => crate::update::apply_now(),
-                    _ => {}
-                }
-                Some(crate::update::status_json(&core))
-            }
-            "/api/show" => {
-                core.open_main.store(true, Ordering::Relaxed);
+            Some(core.status_json(id))
+        }
+        "/api/debug" => {
+            if get("bench").is_some() {
+                core.frame_ms.lock().unwrap().clear();
+                core.update_ms.lock().unwrap().clear();
+                *core.bench_until.lock().unwrap() = Some(std::time::Instant::now() + Duration::from_secs(3));
                 core.repaint();
-                Some(serde_json::json!({ "ok": true }))
+                std::thread::sleep(Duration::from_millis(3300));
             }
-            _ => None,
-        };
-        let _ = match body {
-            Some(b) => req.respond(tiny_http::Response::from_string(b.to_string()).with_header(json.clone())),
-            None => req.respond(tiny_http::Response::from_string("not found").with_status_code(404)),
-        };
+            let stat = |v: &Vec<f32>| {
+                let n = v.len().max(1) as f32;
+                let mut s = v.clone();
+                s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                serde_json::json!({
+                    "n": v.len(),
+                    "avg": (v.iter().sum::<f32>() / n * 10.0).round() / 10.0,
+                    "p50": s.get(s.len() / 2).copied().unwrap_or(0.0),
+                    "max": s.last().copied().unwrap_or(0.0),
+                })
+            };
+            let f = core.frame_ms.lock().unwrap().clone();
+            let u = core.update_ms.lock().unwrap().clone();
+            Some(serde_json::json!({ "frame_interval_ms": stat(&f), "update_ms": stat(&u), "fps": (f.len() as f32 / 3.0).round() }))
+        }
+        "/api/todo" => {
+            match get("do").as_deref() {
+                Some("connect") => crate::todo::send(crate::todo::Msg::Connect),
+                Some("sync") => crate::todo::nudge(),
+                Some("disconnect") => crate::todo::send(crate::todo::Msg::Disconnect),
+                _ => {}
+            }
+            std::thread::sleep(Duration::from_millis(if get("do").as_deref() == Some("connect") { 2500 } else { 0 }));
+            let st = core.todo.lock().unwrap().clone();
+            let s = core.data().settings.todo.clone();
+            Some(serde_json::json!({
+                "enabled": s.enabled,
+                "connected": st.connected,
+                "account": s.account,
+                "list": s.list_name,
+                "pending_code": st.pending.as_ref().map(|p| p.0.clone()),
+                "uri": st.pending.as_ref().map(|p| p.1.clone()),
+                "busy": st.busy,
+                "last_sync": st.last_sync.map(|t| t.to_rfc3339()),
+                "error": st.last_error,
+                "reminders": core.data().reminders.len(),
+            }))
+        }
+        "/api/world" => {
+            let utc = chrono::Utc::now();
+            let lo = crate::world::local_offset_min(utc);
+            let list = core.data().world.clone();
+            Some(serde_json::Value::Array(
+                list.iter()
+                    .map(|w| match crate::world::at(&w.tz, utc, lo) {
+                        Some(t) => serde_json::json!({
+                            "tz": w.tz,
+                            "name": crate::world::display_name(&w.tz, &w.label),
+                            "time": format!("{:02}:{:02}:{:02}", t.hour, t.minute, t.second),
+                            "date": t.date.to_string(),
+                            "utc": crate::world::utc_label(t.utc_min),
+                            "diff": crate::world::diff_label(t.diff_min),
+                            "day": crate::world::day_label(t.day_diff),
+                        }),
+                        None => serde_json::json!({ "tz": w.tz, "error": "unknown time zone" }),
+                    })
+                    .collect(),
+            ))
+        }
+        "/api/countdowns" => {
+            let now = chrono::Local::now().naive_local();
+            let list = core.data().countdowns.clone();
+            Some(serde_json::Value::Array(
+                list.iter()
+                    .map(|c| {
+                        let rem = c.target_dt().map(|t| (t - now).num_seconds());
+                        serde_json::json!({
+                            "id": c.id.to_string(),
+                            "title": c.title,
+                            "target": c.target,
+                            "remaining": rem,
+                            "remaining_text": rem.filter(|s| *s > 0).map(|s| { let (d, cl) = crate::dday::remain_text(s); format!("{d} {cl}").trim().to_string() }),
+                            "done": rem.map(|s| s <= 0).unwrap_or(false),
+                            "fired": c.fired,
+                        })
+                    })
+                    .collect(),
+            ))
+        }
+        "/api/ddays" => {
+            let today = chrono::Local::now().date_naive();
+            let list = core.data().ddays.clone();
+            Some(serde_json::Value::Array(
+                list.iter()
+                    .map(|d| {
+                        let i = crate::dday::info(d, today);
+                        serde_json::json!({
+                            "id": d.id.to_string(),
+                            "title": d.title,
+                            "date": d.date,
+                            "mode": format!("{:?}", d.mode).to_lowercase(),
+                            "label": i.as_ref().map(|i| i.big.clone()),
+                            "detail": i.as_ref().map(|i| i.small.clone()),
+                            "target": i.as_ref().map(|i| i.target.to_string()),
+                            "days": i.as_ref().map(|i| i.days),
+                            "next": i.as_ref().and_then(|i| i.next.as_ref()).map(|n| serde_json::json!({ "name": n.0, "date": n.1.to_string(), "days": n.2 })),
+                        })
+                    })
+                    .collect(),
+            ))
+        }
+        "/api/beds" => {
+            if let Some(n) = get("count").and_then(|c| c.parse::<u32>().ok()).filter(|n| (1..=40).contains(n)) {
+                core.ensure_beds(n);
+            }
+            Some(crate::ui::beds::beds_json(&core))
+        }
+        "/api/bed" => {
+            // ?no=3 (또는 id=) &do=start|clear|pause|resume|toggle|skip|extend &preset=이름 &min=분 &patient=이름
+            let id = get("id").and_then(|s| s.parse::<Id>().ok()).or_else(|| {
+                let no: u32 = get("no")?.parse().ok()?;
+                core.data().timers.iter().find(|t| t.bed.as_ref().map(|b| b.no) == Some(no)).map(|t| t.id)
+            });
+            match (id, get("do").as_deref()) {
+                (Some(id), Some("start")) => {
+                    let patient = get("patient").unwrap_or_default();
+                    let preset = get("preset").and_then(|n| core.data().bed_presets.iter().find(|p| p.name == n).cloned());
+                    // 분은 1~1440 (×60 이 넘쳐 짧은 치료 시간이 되지 않게)
+                    match (preset, get("min").and_then(|m| m.parse::<u32>().ok()).map(|m| m.min(1440))) {
+                        (Some(p), _) => core.bed_start(id, &p.name, p.steps.clone(), &patient, "api"),
+                        (None, Some(m)) if m > 0 => core.bed_start(id, &format!("{m}분"), vec![crate::model::Step { name: "치료".into(), secs: m * 60, sound: "chime".into() }], &patient, "api"),
+                        _ => {}
+                    }
+                }
+                (Some(id), Some("clear")) => core.bed_clear(id, "api"),
+                // EMR 연결: 환자가 들어옴(시작 안 함) · 나감(끝났거나 시작 안 한 베드만 비움)
+                (Some(id), Some("patient")) => {
+                    let r = core.bed_set_patient(id, &get("patient").unwrap_or_default(), &get("since").unwrap_or_default(), &get("note").unwrap_or_default(), "api");
+                    crate::store::log(format!("bed api patient: {r}"));
+                }
+                (Some(id), Some("vacate")) => {
+                    let r = core.bed_vacate(id, &get("patient").unwrap_or_default(), "api");
+                    crate::store::log(format!("bed api vacate: {r}"));
+                }
+                (Some(id), Some("extend")) => core.bed_extend(id, get("min").and_then(|m| m.parse::<u32>().ok()).unwrap_or(5).clamp(1, 1440), "api"),
+                (Some(id), Some(d)) => {
+                    if let Some(c) = Cmd::parse(d) {
+                        core.cmd(id, c, "api");
+                    }
+                }
+                _ => {}
+            }
+            Some(crate::ui::beds::beds_json(&core))
+        }
+        "/api/sync" => {
+            // 설정 바꾸기: ?mode=host|join|off &code= &host= &port= &sound=on|off
+            if get("find").is_some() {
+                let port = core.data().settings.sync.port;
+                crate::sync::discover_async(port);
+                std::thread::sleep(Duration::from_millis(1800));
+            }
+            let (mode, code, host, port, sound) = (get("mode"), get("code"), get("host"), get("port"), get("sound"));
+            if mode.is_some() || code.is_some() || host.is_some() || port.is_some() || sound.is_some() {
+                core.update(|d| {
+                    let s = &mut d.settings.sync;
+                    match mode.as_deref() {
+                        Some("host") => s.mode = crate::model::SyncMode::Host,
+                        Some("join") => s.mode = crate::model::SyncMode::Join,
+                        Some("off") => s.mode = crate::model::SyncMode::Off,
+                        _ => {}
+                    }
+                    if let Some(c) = code {
+                        s.code = c;
+                    }
+                    if let Some(h) = host {
+                        s.host = h;
+                    }
+                    if let Some(p) = port.and_then(|p| p.parse().ok()) {
+                        s.port = p;
+                    }
+                    if let Some(v) = sound {
+                        s.remote_sound = v == "on" || v == "1" || v == "true";
+                    }
+                });
+                std::thread::sleep(Duration::from_millis(2500));
+            }
+            Some(crate::sync::status_json(&core))
+        }
+        "/api/update" => {
+            match get("do").as_deref() {
+                Some("check") => {
+                    crate::update::nudge();
+                    std::thread::sleep(Duration::from_secs(8));
+                }
+                Some("apply") => crate::update::apply_now(),
+                _ => {}
+            }
+            Some(crate::update::status_json(&core))
+        }
+        "/api/show" => {
+            core.open_main.store(true, Ordering::Relaxed);
+            core.repaint();
+            Some(serde_json::json!({ "ok": true }))
+        }
+        _ => None,
     }
 }
 
@@ -319,5 +364,19 @@ mod tests {
         assert_eq!(super::decode("%ED%83%80%EC%9D%B4%EB%A8%B8"), "타이머");
         assert_eq!(super::decode("a+b"), "a b");
         assert_eq!(super::decode("abc%"), "abc%");
+    }
+
+    #[test]
+    fn slow_requests_run_aside() {
+        use super::slow;
+        assert!(slow("/api/update?do=check"));
+        assert!(slow("/api/sync?find=1"));
+        assert!(slow("/api/todo?do=connect"));
+        assert!(slow("/api/debug?bench=1"));
+        // 자주 부르는 것 · 감시(--update-watch)가 부르는 /api/update 는 그대로 (순서 유지)
+        assert!(!slow("/api/update"));
+        assert!(!slow("/api/beds?count=8"));
+        assert!(!slow("/api/bed?no=3&do=patient&patient=x"));
+        assert!(!slow("/status"));
     }
 }

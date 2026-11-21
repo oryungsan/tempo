@@ -11,6 +11,8 @@ mod dday;
 mod engine;
 mod hotkey;
 mod model;
+mod proc;
+mod session;
 mod store;
 mod sync;
 mod todo;
@@ -71,14 +73,15 @@ fn main() {
     if let Some(pid) = args.iter().position(|a| a == "--after-update").and_then(|i| args.get(i + 1)).and_then(|s| s.parse::<u32>().ok()) {
         update::wait_pid(pid, 15_000);
     }
-    let (data, note) = store::load();
+    // 이미 켜져 있으면 데이터는 건드리지 않음 (깨진 파일 보관 · 복구 · 백업은 켜져 있는 쪽 몫)
     if already_running() {
-        ask_existing_to_show(data.settings.api_port);
+        ask_existing_to_show(store::peek().map(|d| d.settings.api_port).unwrap_or(47830));
         return;
     }
-    let first_run = !store::data_path().exists();
-    if first_run {
-        store::save(&data);
+    let (data, note) = store::load();
+    // 처음 실행 · 복구했으면 바로 저장 (실패하면 기록 + 화면 경고 — store::save)
+    if !store::data_path().exists() && !store::save(&data) {
+        store::log("복구 · 처음 데이터를 data.json 에 저장하지 못함");
     }
     let wa = work_area();
     let vs = {
@@ -87,13 +90,21 @@ fn main() {
         if w > 0 && h > 0 { (x as f32, y as f32, (x + w) as f32, (y + h) as f32) } else { wa }
     };
     let core = Arc::new(core::Core::new(data, wa, vs));
-    // 업데이트 직전 진행 상태 이어받기 (있을 때만)
-    core.restore_runs_after_update();
+    // 업데이트 직전 진행 상태 이어받기 (업데이트 · 되돌리기로 켜졌을 때만)
+    let handover = if args.iter().any(|a| a == "--after-update") {
+        core::Handover::AfterUpdate
+    } else if args.iter().any(|a| a == "--after-rollback") {
+        core::Handover::AfterRollback
+    } else {
+        core::Handover::Normal
+    };
+    core.restore_runs_after_update(handover);
     store::log(format!("started v{} (pid {})", env!("CARGO_PKG_VERSION"), std::process::id()));
     if let Some(n) = note {
         store::log(n);
     }
 
+    session::spawn(core.clone());
     hotkey::spawn(core.clone());
     api::spawn(core.clone());
     todo::spawn(core.clone());
@@ -129,8 +140,26 @@ fn main() {
     };
     // 시험용: --page timers|alarms|reminders|stopwatch|countdown|dday|world|settings · --edit <타이머 이름> · --new-alarm
     //         --open new-countdown|new-dday|city|dday:<이름> (편집 창 바로 열기)
+    //         --open bed:<번호>|bed-presets|board-bed:<번호> [--close-after <초>] (치료실 창 — 업데이트 대기 시험)
     let arg_after = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
-    let start = ui::StartOpts { show_main, page: arg_after("--page"), edit: arg_after("--edit"), new_alarm: args.iter().any(|a| a == "--new-alarm"), focus: arg_after("--focus"), open: arg_after("--open") };
+    // 치료실 창 시험 인자는 시험 모드(TEMPO_TEST=1 + 다른 TEMPO_DIR)에서만, 업데이트 · 되돌리기로 켜질 땐 무시
+    let is_bed_test = |x: &str| x == "bed-presets" || x.starts_with("bed:") || x.starts_with("board-bed:");
+    let test_ok = store::test_mode() && !args.iter().any(|a| a == "--after-update" || a == "--after-rollback");
+    let test_open = arg_after("--open").filter(|x| test_ok && is_bed_test(x));
+    let close_after = match arg_after("--close-after") {
+        None => None,
+        Some(s) => match s.parse::<u64>() {
+            Ok(n) if test_ok && (1..=3600).contains(&n) => Some(n),
+            _ => {
+                store::log(format!("--close-after {s} 무시 (시험 모드 · 1~3600초만)"));
+                None
+            }
+        },
+    };
+    if arg_after("--open").is_some_and(|x| is_bed_test(&x)) && test_open.is_none() {
+        store::log("--open 치료실 창 시험 인자 무시 (시험 모드 아님)");
+    }
+    let start = ui::StartOpts { show_main, page: arg_after("--page"), edit: arg_after("--edit"), new_alarm: args.iter().any(|a| a == "--new-alarm"), focus: arg_after("--focus"), open: arg_after("--open").filter(|x| !is_bed_test(x)), test_open, close_after };
     let c2 = core.clone();
     if let Err(e) = eframe::run_native("tempo", options, Box::new(move |cc| Ok(Box::new(ui::App::new(cc, c2, start))))) {
         store::log(format!("window failed: {e}"));
