@@ -44,7 +44,7 @@ fn run(core: Arc<Core>) {
             }
         }
         if want && cur.is_none() && Instant::now() >= retry_at {
-            let addr = format!("0.0.0.0:{}", cfg.port);
+            let addr = format!("{}:{}", crate::store::bind_ip(), cfg.port);
             match tiny_http::Server::http(&addr) {
                 Ok(s) => {
                     crate::store::log(format!("lan beds: listening on {addr} (read only)"));
@@ -239,6 +239,9 @@ pub fn local_ip() -> Option<String> {
 
 /// 패킷은 안 보냄 (UDP connect 는 나갈 경로만 고름)
 fn route_ip() -> Option<String> {
+    if crate::store::loopback_only() {
+        return Some("127.0.0.1".into());
+    }
     let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     s.connect("192.168.0.1:9").ok()?;
     let ip = s.local_addr().ok()?.ip();
@@ -278,16 +281,19 @@ mod tests {
 
     #[test]
     fn stop_releases_port_right_away() {
-        // 0.0.0.0 에 연 서버를 끄면 같은 포트를 바로 다시 열 수 있어야 함 (끄기 · 포트 바꾸기)
+        // 연 서버를 끄면 같은 포트를 바로 다시 열 수 있어야 함 (끄기 · 포트 바꾸기).
+        // 시험은 bind_ip() = 127.0.0.1 (0.0.0.0 이면 방화벽 「액세스 허용」 창)
+        let ip = crate::store::bind_ip();
+        assert_eq!(ip, "127.0.0.1");
         let port = {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             l.local_addr().unwrap().port()
         };
-        let s = tiny_http::Server::http(format!("0.0.0.0:{port}")).expect("bind");
+        let s = tiny_http::Server::http(format!("{ip}:{port}")).expect("bind");
         stop(Some(s), port);
         let mut again = None;
         for _ in 0..20 {
-            if let Ok(s) = tiny_http::Server::http(format!("0.0.0.0:{port}")) {
+            if let Ok(s) = tiny_http::Server::http(format!("{ip}:{port}")) {
                 again = Some(s);
                 break;
             }

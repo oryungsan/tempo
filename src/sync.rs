@@ -266,6 +266,9 @@ pub fn pc_name() -> String {
 
 /// 이 PC 의 내부망 주소 (기본 경로 쪽)
 pub fn lan_ip() -> Option<String> {
+    if crate::store::loopback_only() {
+        return Some("127.0.0.1".into());
+    }
     let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     s.connect("8.8.8.8:80").ok()?;
     s.local_addr().ok().map(|a| a.ip().to_string())
@@ -687,8 +690,8 @@ fn supervisor(core: Arc<Core>) {
 }
 
 fn bind_addr() -> String {
-    // 시험용: TEMPO_SYNC_BIND=127.0.0.1 (방화벽 확인 창 없이)
-    std::env::var("TEMPO_SYNC_BIND").unwrap_or_else(|_| "0.0.0.0".into())
+    // 운영 0.0.0.0, 시험(단위 테스트 · 다른 TEMPO_DIR · TEMPO_BIND) 127.0.0.1 — store::bind_ip
+    crate::store::bind_ip()
 }
 
 /// accept() 로 받은 소켓은 Windows 에서 상속 가능 핸들 → 잠깐 도는 자식(PowerShell 방화벽 확인 · 음성 안내)에게도
@@ -893,12 +896,17 @@ fn responder(port: u16, stop: Arc<AtomicBool>) {
 
 /// 같은 내부망의 Tempo 호스트들 (wait_ms 동안 대답 모음)
 pub fn discover(port: u16, wait_ms: u64) -> Vec<Found> {
-    let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") else { return vec![] };
-    let _ = sock.set_broadcast(true);
+    // 시험(loopback 만)은 이 컴퓨터 안에서만 묻고 브로드캐스트하지 않음
+    let local = crate::store::loopback_only();
+    let Ok(sock) = std::net::UdpSocket::bind(if local { "127.0.0.1:0" } else { "0.0.0.0:0" }) else { return vec![] };
+    let _ = sock.set_broadcast(!local);
     let _ = sock.set_read_timeout(Some(Duration::from_millis(200)));
     let q = port + 1;
-    let mut targets = vec![format!("255.255.255.255:{q}"), format!("127.0.0.1:{q}")];
-    if let Some(ip) = lan_ip() {
+    let mut targets = vec![format!("127.0.0.1:{q}")];
+    if !local {
+        targets.push(format!("255.255.255.255:{q}"));
+    }
+    if let Some(ip) = lan_ip().filter(|_| !local) {
         if let Some((a, _)) = ip.rsplit_once('.') {
             targets.push(format!("{a}.255:{q}"));
         }

@@ -18,13 +18,39 @@ pub fn dir() -> PathBuf {
 /// 시험 모드 = `TEMPO_TEST=1` **이고** `TEMPO_DIR` 이 기본 데이터 폴더(%APPDATA%\Tempo)가 아닌 다른 폴더.
 /// 시험 전용 인자(치료실 창 열기 · 자동 닫기 · 포커스 안 뺏기)는 이때만 — 실제 데이터로 도는 배포 실행엔 안 걸림
 pub fn test_mode() -> bool {
-    if std::env::var("TEMPO_TEST").as_deref() != Ok("1") {
-        return false;
-    }
+    std::env::var("TEMPO_TEST").as_deref() == Ok("1") && test_dir()
+}
+
+/// `TEMPO_DIR` 이 기본 데이터 폴더(%APPDATA%\Tempo)가 아닌 다른 폴더 = 시험 인스턴스
+pub fn test_dir() -> bool {
     let Some(t) = std::env::var_os("TEMPO_DIR").filter(|v| !v.is_empty()) else { return false };
     let norm = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p).to_string_lossy().trim_end_matches(['\\', '/']).to_lowercase();
     let real = std::env::var_os("APPDATA").map(|a| norm(PathBuf::from(a).join("Tempo")));
     Some(norm(PathBuf::from(t))) != real
+}
+
+/// 내부망으로 여는 소켓(PC 연동 호스트 · 찾기 응답 · 내부망 베드 보기)의 주소.
+/// 운영 = `0.0.0.0`(그대로). 단위 테스트 · 시험 인스턴스(다른 `TEMPO_DIR`) = `127.0.0.1` 만 —
+/// 시험 exe 는 경로마다 새 프로그램이라 0.0.0.0 에 열 때마다 Windows 방화벽 「액세스 허용」 창이 떴음.
+/// `TEMPO_BIND`(예: 127.0.0.1 · 0.0.0.0)로 직접 정할 수 있음 (옛 이름 `TEMPO_SYNC_BIND` 도 읽음)
+pub fn bind_ip() -> String {
+    for k in ["TEMPO_BIND", "TEMPO_SYNC_BIND"] {
+        if let Ok(v) = std::env::var(k) {
+            if !v.trim().is_empty() {
+                return v.trim().to_string();
+            }
+        }
+    }
+    if cfg!(test) || test_dir() {
+        "127.0.0.1".into()
+    } else {
+        "0.0.0.0".into()
+    }
+}
+
+/// 이 컴퓨터 안에서만 (bind_ip 가 loopback) — 내부망 주소 알아보기 · 브로드캐스트도 하지 않음
+pub fn loopback_only() -> bool {
+    bind_ip().parse::<std::net::IpAddr>().map(|ip| ip.is_loopback()).unwrap_or(false)
 }
 
 pub fn data_path() -> PathBuf {

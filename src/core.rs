@@ -1701,6 +1701,15 @@ mod bed_tests {
     }
 
     #[test]
+    fn tests_and_test_instances_bind_loopback_only() {
+        // 0.0.0.0 에 열면 시험 exe 마다 방화벽 「액세스 허용」 창 — 시험은 127.0.0.1 만
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(store::bind_ip(), "127.0.0.1");
+        assert!(store::loopback_only());
+        assert_eq!(crate::sync::lan_ip().as_deref(), Some("127.0.0.1"), "내부망 주소 알아보기도 바깥 소켓을 열지 않음");
+    }
+
+    #[test]
     fn cards_can_be_reopened_while_running() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("tempo-cards-{}", std::process::id()));
