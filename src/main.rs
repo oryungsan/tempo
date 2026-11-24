@@ -10,6 +10,7 @@ mod core;
 mod dday;
 mod engine;
 mod hotkey;
+mod lan;
 mod model;
 mod proc;
 mod session;
@@ -110,6 +111,7 @@ fn main() {
     todo::spawn(core.clone());
     update::spawn(core.clone());
     sync::spawn(core.clone());
+    lan::spawn(core.clone());
     {
         let core = core.clone();
         std::thread::Builder::new()

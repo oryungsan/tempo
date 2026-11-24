@@ -799,6 +799,46 @@ fn section(ui: &mut Ui, p: &Pal, title: &str, body: impl FnOnce(&mut Ui)) {
     ui.add_space(18.0);
 }
 
+/// 설정 → 치료실 「다른 기기에서 베드 보기」 (내부망, 읽기 전용)
+fn lan_beds_rows(ui: &mut Ui, p: &Pal, c: &mut crate::model::LanBeds) {
+    row(ui, p, "다른 기기에서 베드 보기 (내부망)", "같은 내부망의 화면 기기(베드 옆 보드 · 태블릿)가 베드 상태를 읽기만 합니다 — 이름 · 단계 · 남은 시간. 조작은 안 되고 토큰이 필요합니다 (이 PC 만, 기본 끔)", |ui| {
+        let was = c.enabled;
+        toggle(ui, p, &mut c.enabled);
+        if c.enabled && !was && c.token.trim().is_empty() {
+            c.token = crate::lan::new_token();
+        }
+    });
+    if !c.enabled {
+        return;
+    }
+    let ip = crate::lan::local_ip().unwrap_or_else(|| "이 PC 주소".into());
+    row(ui, p, "기기에 넣을 주소", "화면 기기 설정에 이 주소와 아래 토큰을 넣으세요", |ui| {
+        let url = format!("http://{ip}:{}", c.port);
+        if ghost(ui, p, "복사").clicked() {
+            ui.ctx().copy_text(url.clone());
+        }
+        ui.label(RichText::new(url).color(p.text).size(14.0).monospace());
+    });
+    row(ui, p, "토큰", "기기가 읽을 때 보내는 열쇠 — 새로 만들면 예전 토큰을 쓰던 기기는 다시 넣어야 합니다", |ui| {
+        if ghost(ui, p, "새로 만들기").clicked() {
+            c.token = crate::lan::new_token();
+        }
+        if ghost(ui, p, "복사").clicked() {
+            ui.ctx().copy_text(c.token.clone());
+        }
+        ui.label(RichText::new(&c.token).color(p.text).size(14.0).monospace());
+    });
+    row(ui, p, "포트", "다른 기기에서 안 열리면 Windows 방화벽에서 이 TCP 포트(같은 내부망)를 허용하세요", |ui| {
+        let mut port = c.port as u32;
+        if ui.add(egui::DragValue::new(&mut port).range(1024..=65535)).changed() {
+            c.port = port as u16;
+        }
+    });
+    if !crate::lan::usable(c) {
+        ui.label(RichText::new("토큰이 8자보다 짧아 아직 열지 않았습니다 — 「새로 만들기」를 누르세요").color(p.amber).size(12.0));
+    }
+}
+
 fn settings_page(ui: &mut Ui, core: &Arc<Core>, st: &mut MainState, p: &Pal) {
     page_header(ui, p, "설정", "", None);
     let mut s = core.data().settings.clone();
@@ -938,6 +978,8 @@ fn settings_page(ui: &mut Ui, core: &Arc<Core>, st: &mut MainState, p: &Pal) {
             row(ui, p, "베드를 떠 있는 카드로도 보기", "치료 중 · 끝난 베드를 화면에 떠 있는 작은 카드로 (이 PC 만, 기본 끔)", |ui| {
                 toggle(ui, p, &mut s.bed_cards);
             });
+            ui.separator();
+            lan_beds_rows(ui, p, &mut s.lan_beds);
         });
         }
         section(ui, p, "PC 연동", |ui| sync_section(ui, p, &mut s.sync));

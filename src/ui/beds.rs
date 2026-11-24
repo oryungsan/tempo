@@ -716,6 +716,18 @@ pub fn board(ctx: &egui::Context, core: &Arc<Core>, st: &mut Board, p: &Pal) -> 
 }
 
 /// API 용
+/// 화면 기기용 상태 한 낱말 — empty(빈 베드) · waiting(치료 전) · running · paused(단계 사이 대기 포함) · done
+pub fn bed_state(phase: Phase, waiting: bool, patient: &str) -> &'static str {
+    match phase {
+        Phase::Idle if patient.trim().is_empty() => "empty",
+        Phase::Idle => "waiting",
+        Phase::Running if waiting => "paused",
+        Phase::Running => "running",
+        Phase::Paused => "paused",
+        Phase::Done => "done",
+    }
+}
+
 pub fn beds_json(core: &Core) -> serde_json::Value {
     let list = beds(core);
     serde_json::Value::Array(
@@ -734,9 +746,13 @@ pub fn beds_json(core: &Core) -> serde_json::Value {
                     "step": if v.phase.active() { v.idx + 1 } else { 0 },
                     "step_count": v.n,
                     "step_name": v.step_name,
-                    "step_remaining": (v.step_rem.as_secs_f32() * 10.0).round() / 10.0,
-                    "total_remaining": (v.total_rem.as_secs_f32() * 10.0).round() / 10.0,
+                    "next_step_name": if v.phase.active() { v.next_name.clone() } else { None },
+                    "step_remaining": (v.step_rem.as_secs_f64() * 10.0).round() / 10.0,
+                    "total_remaining": (v.total_rem.as_secs_f64() * 10.0).round() / 10.0,
                     "overtime": v.done_for.map(|d| d.as_secs()),
+                    "state": bed_state(v.phase, v.waiting, &b.patient),
+                    "step_secs": if v.phase.active() { v.step_secs.get(v.idx).copied().unwrap_or(0) } else { 0 },
+                    "total_secs": v.total.as_secs(),
                 })
             })
             .collect(),

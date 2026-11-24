@@ -419,6 +419,29 @@ pub struct Settings {
     /// 없으면 기본: 치료실 = 베드가 있을 때만, 나머지 = 보임
     #[serde(default)]
     pub menu: std::collections::BTreeMap<String, bool>,
+    /// 내부망 베드 보기 — 같은 망의 화면 기기가 베드 상태를 읽기만 (이 PC, 기본 끔)
+    #[serde(default)]
+    pub lan_beds: LanBeds,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct LanBeds {
+    pub enabled: bool,
+    #[serde(default = "lan_port")]
+    pub port: u16,
+    /// 읽을 때 필요한 토큰 (켤 때 저절로 만듦)
+    #[serde(default)]
+    pub token: String,
+}
+
+fn lan_port() -> u16 {
+    47850
+}
+
+impl Default for LanBeds {
+    fn default() -> Self {
+        LanBeds { enabled: false, port: lan_port(), token: String::new() }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -498,6 +521,7 @@ impl Default for Settings {
             bed_board: false,
             bed_cards: false,
             menu: Default::default(),
+            lan_beds: LanBeds::default(),
         }
     }
 }

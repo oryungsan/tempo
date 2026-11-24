@@ -121,6 +121,20 @@ Tempo 가 깔린 여러 PC 에서 **같은 타이머 · 알람 · 리마인더 �
 | `/api/beds` (`?count=8`) · `/api/bed?no=3&do=start&preset=…&patient=…` | 치료실 베드 상태 · 시작 · 비우기 · 연장 |
 | `/api/sync` (`?mode=host\|join\|off&code=…&host=…&find=1`) | PC 연동 상태 · 설정 |
 
+### 다른 기기에서 베드 보기 (내부망, 읽기 전용 · 기본 끔)
+
+설정 → 치료실 → 「다른 기기에서 베드 보기」를 켜면, 같은 내부망의 화면 기기(베드 옆 보드 · 태블릿)가 베드 상태를 **읽기만** 할 수 있습니다.
+로컬 API 와 다른 포트(기본 **47850**)에 읽기 하나만 열리고, 시작 · 비우기 같은 조작은 없습니다. 토큰은 켤 때 저절로 만들어지고 설정에 보입니다.
+
+```
+GET http://<이 PC>:47850/api/beds[?no=3]      Authorization: Bearer <토큰>   (또는 X-Tempo-Token 헤더 · ?token=)
+→ { "source":"tempo", "version", "now_ms", "tz_min",
+    "beds":[ { "no", "state", "patient", "since", "program", "step", "step_count", "step_name", "next_step_name",
+               "step_secs", "step_remaining", "total_secs", "total_remaining", "overtime" } ] }
+```
+`state` = `empty`(빈 베드) · `waiting`(시작 전) · `running` · `paused` · `done`(`overtime` = 끝난 뒤 지난 초). 토큰이 틀리면 401, 다른 경로 404, GET 이 아니면 405.
+접수 메모는 보내지 않습니다. 다른 기기에서 안 열리면 Windows 방화벽에서 그 TCP 포트를 같은 내부망(LocalSubnet)에 허용하세요.
+
 ## 직접 빌드
 
 Rust (stable, `x86_64-pc-windows-gnu` 또는 `-msvc`).
