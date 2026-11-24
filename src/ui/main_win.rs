@@ -871,7 +871,7 @@ fn settings_page(ui: &mut Ui, core: &Arc<Core>, st: &mut MainState, p: &Pal) {
                 }
             });
             if !menu_visible(&s.menu, "beds", has_beds) {
-                ui.label(RichText::new("치료실 = 한의원 · 물리치료실처럼 베드마다 치료 시간을 재는 기능 (기본 숨김)").color(p.faint).size(12.0));
+                ui.label(RichText::new("치료실 = 물리치료실처럼 베드마다 치료 시간을 재는 기능 (기본 숨김)").color(p.faint).size(12.0));
             }
         });
         section(ui, p, "일반", |ui| {

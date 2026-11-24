@@ -31,7 +31,7 @@
 - **치료실 보드 창**: 치료실 모니터 · TV 에 크게 (F11 전체 화면, 터치로 시작), 켜 두면 다시 켜도 열림
 - PC 연동 시 데스크 · 치료실 PC 가 같은 베드 판
 - API: `/api/beds?count=8` · `/api/bed?no=3&do=start&preset=침 15분&patient=…` (do=start|clear|extend|pause|resume|skip)
-- **EMR 연결용**: `do=patient&patient=…&since=HH:MM&note=…` = 환자가 베드에 들어옴(이름 · 입실 시각 · 접수 메모, 시작은 안 함 → 「치료 전 · 입실 N분째」) / `do=vacate&patient=…` = 나감(끝났거나 시작 전이면 비움, 치료 중이면 그대로)
+- **접수 프로그램 연결용**: `do=patient&patient=…&since=HH:MM&note=…` = 환자가 베드에 들어옴(이름 · 입실 시각 · 접수 메모, 시작은 안 함 → 「치료 전 · 입실 N분째」) / `do=vacate&patient=…` = 나감(끝났거나 시작 전이면 비움, 치료 중이면 그대로)
 
 ### 디자인 6종 × 색 테마 10종
 클래식 · 원형 · **모래시계**(모래가 떨어지고 단계마다 뒤집힘) · 미니멀 · 디지털(7세그먼트) · 채우기

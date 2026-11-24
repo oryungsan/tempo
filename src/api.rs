@@ -284,7 +284,7 @@ fn handle(core: &Arc<Core>, url: &str) -> Option<serde_json::Value> {
                     }
                 }
                 (Some(id), Some("clear")) => core.bed_clear(id, "api"),
-                // EMR 연결: 환자가 들어옴(시작 안 함) · 나감(끝났거나 시작 안 한 베드만 비움)
+                // 접수 프로그램 연결: 환자가 들어옴(시작 안 함) · 나감(끝났거나 시작 안 한 베드만 비움)
                 (Some(id), Some("patient")) => {
                     let r = core.bed_set_patient(id, &get("patient").unwrap_or_default(), &get("since").unwrap_or_default(), &get("note").unwrap_or_default(), "api");
                     crate::store::log(format!("bed api patient: {r}"));

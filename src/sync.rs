@@ -1323,8 +1323,8 @@ mod tests {
 
     #[test]
     fn natural_keys() {
-        let v = json!({ "name": "추나" });
-        assert_eq!(natural_key("t", &v), Some("\"추나\"".into()));
+        let v = json!({ "name": "스트레칭" });
+        assert_eq!(natural_key("t", &v), Some("\"스트레칭\"".into()));
         assert!(natural_key("o", &v).is_none());
     }
 

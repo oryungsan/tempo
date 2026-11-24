@@ -57,7 +57,7 @@ pub fn tile(ui: &mut Ui, core: &Core, p: &Pal, def: &TimerDef, v: &TimerView, re
     let w = r - l;
     match v.phase {
         Phase::Idle if !b.patient.is_empty() => {
-            // 환자는 들어왔고 치료 시작 전 (EMR 연결)
+            // 환자는 들어왔고 치료 시작 전 (접수 프로그램 연결)
             pt.rect_filled(rect, cr(rad), lerp(p.card, p.amber, if p.dark { 0.10 } else { 0.08 }));
             pt.rect_stroke(rect, cr(rad), Stroke::new(1.5 * k, p.amber.gamma_multiply(if resp.hovered() { 1.0 } else { 0.7 })), egui::StrokeKind::Inside);
             pt.text(Pos2::new(l, t), Align2::LEFT_TOP, &def.name, bold(17.0 * k), p.text);

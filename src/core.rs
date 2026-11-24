@@ -656,7 +656,7 @@ impl Core {
         self.data().timers.iter().find(|t| t.id == id).and_then(|t| t.bed.clone())
     }
 
-    /// 환자가 베드에 들어옴 (EMR 연결) — 시작은 안 함. 반환 = 한 일
+    /// 환자가 베드에 들어옴 (접수 프로그램 연결) — 시작은 안 함. 반환 = 한 일
     pub fn bed_set_patient(&self, id: Id, name: &str, since: &str, note: &str, src: &str) -> &'static str {
         let (Some(v), Some(b)) = (self.view(id), self.bed_info(id)) else { return "no bed" };
         let name = name.trim().to_string();
@@ -700,7 +700,7 @@ impl Core {
         }
     }
 
-    /// 환자가 베드에서 나감 (EMR 연결) — 끝난 베드 · 시작 안 한 베드만 비움, 치료 중이면 그대로
+    /// 환자가 베드에서 나감 (접수 프로그램 연결) — 끝난 베드 · 시작 안 한 베드만 비움, 치료 중이면 그대로
     pub fn bed_vacate(&self, id: Id, name: &str, src: &str) -> &'static str {
         let (Some(v), Some(b)) = (self.view(id), self.bed_info(id)) else { return "no bed" };
         let matches = name.trim().is_empty() || b.patient == name.trim();
@@ -1648,7 +1648,7 @@ mod bed_tests {
     }
 
     #[test]
-    fn emr_patient_and_vacate_rules() {
+    fn checkin_patient_and_vacate_rules() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // 시험 데이터 폴더 (실제 %APPDATA%\Tempo 를 건드리지 않게)
         let dir = std::env::temp_dir().join(format!("tempo-bedtest-{}", std::process::id()));
