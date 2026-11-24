@@ -439,71 +439,137 @@ fn full_list(core: &Core) -> Vec<(String, i64, Option<Value>)> {
     out
 }
 
+/// 받은 항목 하나 (시각은 이미 이 PC 시계로 바꿈)
+#[derive(Clone)]
+struct Incoming {
+    k: String,
+    rev: i64,
+    /// 받은 그대로의 값 (중계용)
+    v: Option<Value>,
+    /// 실행 상태(r:)면 이 PC 시계로 바꾼 것
+    snap: Option<crate::engine::Snap>,
+}
+
+/// 업데이트 교체 중(freeze)이라 적용을 미룬 변경 — 교체가 취소되면(풀리면) 받은 순서대로 적용
+static HELD: Mutex<Vec<Vec<Incoming>>> = Mutex::new(Vec::new());
+
 /// 받은 items — 더 최근 것만 반영. 반환 = 반영한 것 (호스트는 다른 PC 로 다시 보냄)
-fn on_items(core: &Core, msg: &Value) -> Vec<(String, i64, Option<Value>)> {
+pub(crate) fn on_items(core: &Core, msg: &Value) -> Vec<(String, i64, Option<Value>)> {
     let offset = now_ms() - msg["now"].as_i64().unwrap_or_else(now_ms);
     let conv = |r: i64| if r >= REAL_MS { r + offset } else { r };
     let Some(map) = msg["items"].as_object() else { return vec![] };
+    let list: Vec<Incoming> = map
+        .iter()
+        .map(|(k, e)| {
+            let v = e.get("v").filter(|v| !v.is_null()).cloned();
+            let snap = k.starts_with("r:").then(|| v.clone().and_then(|v| serde_json::from_value::<crate::engine::Snap>(v).ok())).flatten().map(|mut sn| {
+                sn.since_ms = sn.since_ms.map(|t| t + offset);
+                sn.done_ms = sn.done_ms.map(|t| t + offset);
+                sn
+            });
+            Incoming { k: k.clone(), rev: conv(e["r"].as_i64().unwrap_or(0)), v, snap }
+        })
+        .collect();
+    match apply_incoming(core, &list) {
+        Some(acc) => acc,
+        None => {
+            // 교체 중이라 거절됨 — rev 를 소비하지 않고(받은 것으로 치지 않음 · 중계 안 함) 보류
+            log(format!("sync: {} change(s) from other PC held until update finishes", list.len()));
+            HELD.lock().unwrap().push(list);
+            vec![]
+        }
+    }
+}
+
+/// 비교 → 적용 → rev 기록을 한 번에. 적용이 거절되면(업데이트 교체 중) 아무것도 기록하지 않고 None
+fn apply_incoming(core: &Core, list: &[Incoming]) -> Option<Vec<(String, i64, Option<Value>)>> {
     // 이미 같은 값이면 rev 만 맞추고 반영은 건너뜀 (다시 연결할 때 헛반영 줄이기)
     let current = items(&core.data());
     let mut data_items: Vec<(String, Option<Value>)> = Vec::new();
     let mut runs: Vec<(Id, crate::engine::Snap)> = Vec::new();
+    let mut run_revs: Vec<(Id, i64)> = Vec::new();
+    let mut revs: Vec<(String, i64, bool)> = Vec::new();
     let mut accepted = Vec::new();
-    for (k, e) in map {
-        let rev = conv(e["r"].as_i64().unwrap_or(0));
-        let v = e.get("v").filter(|v| !v.is_null()).cloned();
-        if let Some(id) = k.strip_prefix("r:").and_then(|x| x.parse::<Id>().ok()) {
+    for e in list {
+        if let Some(id) = e.k.strip_prefix("r:").and_then(|x| x.parse::<Id>().ok()) {
             let local = with_runs(|r| r.get(&id).map(|m| m.rev).unwrap_or(0));
-            if rev > local {
-                if let Some(mut sn) = v.clone().and_then(|v| serde_json::from_value::<crate::engine::Snap>(v).ok()) {
-                    sn.since_ms = sn.since_ms.map(|t| t + offset);
-                    sn.done_ms = sn.done_ms.map(|t| t + offset);
-                    with_runs(|r| {
-                        r.insert(id, RunMeta { rev, remote: true });
-                    });
-                    runs.push((id, sn));
-                    accepted.push((k.clone(), rev, v));
+            if e.rev > local {
+                if let Some(sn) = &e.snap {
+                    runs.push((id, sn.clone()));
+                    run_revs.push((id, e.rev));
+                    accepted.push((e.k.clone(), e.rev, e.v.clone()));
                 }
             }
             continue;
         }
-        let local = with_store(|s| s.revs.get(k).copied().unwrap_or(0).max(s.tombs.get(k).copied().unwrap_or(0)));
-        if rev > local {
-            let same = match &v {
-                Some(x) => current.get(k) == Some(x),
-                None => !current.contains_key(k),
+        let local = with_store(|s| s.revs.get(&e.k).copied().unwrap_or(0).max(s.tombs.get(&e.k).copied().unwrap_or(0)));
+        if e.rev > local {
+            let same = match &e.v {
+                Some(x) => current.get(&e.k) == Some(x),
+                None => !current.contains_key(&e.k),
             };
-            with_store(|s| {
-                if v.is_some() {
-                    s.revs.insert(k.clone(), rev);
+            revs.push((e.k.clone(), e.rev, e.v.is_some()));
+            if !same {
+                data_items.push((e.k.clone(), e.v.clone()));
+            }
+            accepted.push((e.k.clone(), e.rev, e.v.clone()));
+        }
+    }
+    let mut failed: Vec<String> = Vec::new();
+    if !data_items.is_empty() || !runs.is_empty() {
+        // 못 읽은 항목(failed)은 받은 것으로 치지 않음 (다음 연결 때 다시)
+        failed = core.apply_remote(&data_items, &runs, now_ms())?;
+        set_status(|s| s.last_rx = Some(chrono::Local::now()));
+    }
+    if !revs.is_empty() {
+        with_store(|s| {
+            for (k, rev, live) in revs.iter().filter(|x| !failed.contains(&x.0)) {
+                if *live {
+                    s.revs.insert(k.clone(), *rev);
                     s.tombs.remove(k);
                 } else {
                     s.revs.remove(k);
-                    s.tombs.insert(k.clone(), rev);
+                    s.tombs.insert(k.clone(), *rev);
                 }
-            });
-            if !same {
-                data_items.push((k.clone(), v.clone()));
             }
-            accepted.push((k.clone(), rev, v));
-        }
-    }
-    if !data_items.is_empty() || !runs.is_empty() {
+        });
         save_store();
-        let failed = core.apply_remote(&data_items, &runs, now_ms());
-        if !failed.is_empty() {
-            // 못 읽은 건 받은 것으로 치지 않음 (다음 연결 때 다시)
-            with_store(|s| {
-                for k in &failed {
-                    s.revs.remove(k);
-                }
-            });
-            save_store();
-            accepted.retain(|a| !failed.contains(&a.0));
-        }
-        set_status(|s| s.last_rx = Some(chrono::Local::now()));
     }
-    accepted
+    for (id, rev) in run_revs {
+        with_runs(|r| {
+            r.insert(id, RunMeta { rev, remote: true });
+        });
+    }
+    accepted.retain(|a| !failed.contains(&a.0));
+    Some(accepted)
+}
+
+#[cfg(test)]
+pub(crate) fn local_rev(k: &str) -> i64 {
+    with_store(|s| s.revs.get(k).copied().unwrap_or(0))
+}
+
+/// 업데이트 교체가 취소돼 변경을 다시 받을 수 있을 때 (Core::freeze(false)) — 보류했던 다른 PC 변경 적용 · 중계
+pub fn release_held(core: &Core) {
+    let held: Vec<Vec<Incoming>> = std::mem::take(&mut *HELD.lock().unwrap());
+    if held.is_empty() {
+        return;
+    }
+    let host = core.data().settings.sync.mode == SyncMode::Host;
+    let mut n = 0;
+    for list in held {
+        match apply_incoming(core, &list) {
+            Some(acc) => {
+                n += acc.len();
+                // 호스트 = 다른 참여 PC 들에게도 (보낸 PC 로 되돌아가도 rev 가 같아 무시됨)
+                if host && !acc.is_empty() {
+                    send_all(&items_msg(&acc, false), None);
+                }
+            }
+            None => HELD.lock().unwrap().push(list), // 다시 막힘 — 다음 해제 때
+        }
+    }
+    log(format!("sync: applied {n} held change(s) after update was cancelled"));
 }
 
 /// 처음 합치기 (참여 쪽): 호스트에 같은 게 있으면 이 PC 것은 빼고 호스트 것으로

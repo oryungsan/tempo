@@ -215,6 +215,9 @@ impl Core {
         self.frozen.store(on, Ordering::SeqCst);
         if on {
             log("update: freezing changes for handover");
+        } else {
+            // 교체 취소 — 그사이 보류한 다른 PC 변경을 이제 적용
+            crate::sync::release_held(self);
         }
     }
 
@@ -236,6 +239,19 @@ impl Core {
         if self.refuse("change") {
             return;
         }
+        self.update_inner(f);
+    }
+
+    /// 앱이 스스로 바꾸는 상태(울린 일회성 알람 끄기 · 카운트다운/디데이 「울렸음」) — 업데이트 교체 중에도 막지 않음.
+    /// 막으면 교체가 취소됐을 때 그 알람이 꺼지지 않고 다음 날 또 울림. 저장은 바로 되므로 교체가 이어져도 새 버전이 읽음
+    fn update_internal(&self, f: impl FnOnce(&mut Data)) {
+        if self.frozen.load(Ordering::SeqCst) {
+            log("update in progress — internal state change applied anyway");
+        }
+        self.update_inner(f);
+    }
+
+    fn update_inner(&self, f: impl FnOnce(&mut Data)) {
         let hk_before = self.hotkey_sig();
         let (before, after) = {
             let mut d = self.data();
@@ -364,9 +380,10 @@ impl Core {
     }
 
     /// 다른 PC 에서 온 변경 — 다시 보내지 않음
-    pub fn apply_remote(&self, items: &[(String, Option<serde_json::Value>)], runs: &[(Id, crate::engine::Snap)], now_ms: i64) -> Vec<String> {
+    /// 반환 = 못 읽은 항목 키들. None = 업데이트 교체 중이라 **하나도 적용 안 함** (부른 쪽이 rev 를 소비하지 않고 보류)
+    pub fn apply_remote(&self, items: &[(String, Option<serde_json::Value>)], runs: &[(Id, crate::engine::Snap)], now_ms: i64) -> Option<Vec<String>> {
         if self.refuse("change from other PC") {
-            return vec![];
+            return None;
         }
         let hk_before = self.hotkey_sig();
         let alarms_before: Vec<AlarmDef> = self.data().alarms.clone();
@@ -411,7 +428,7 @@ impl Core {
             self.catch_remote_alarms(&alarms_before);
         }
         self.repaint();
-        failed
+        Some(failed)
     }
 
     /// 처음 합치기: 다른 PC(호스트)와 같은 항목은 이 PC 것을 빼고(호스트 것이 들어옴), 연동 타이머 · 단축키 맞춤
@@ -1160,7 +1177,7 @@ impl Core {
             return;
         }
         let ids: Vec<Id> = due.iter().map(|c| c.id).collect();
-        self.update(|d| {
+        self.update_internal(|d| {
             for c in d.countdowns.iter_mut().filter(|c| ids.contains(&c.id)) {
                 c.fired = true;
             }
@@ -1240,7 +1257,7 @@ impl Core {
         if fire.is_empty() {
             return;
         }
-        self.update(|data| {
+        self.update_internal(|data| {
             for (d, a) in &fire {
                 if let Some(x) = data.ddays.iter_mut().find(|x| x.id == d.id) {
                     x.fired.push(a.key.clone());
@@ -1348,7 +1365,7 @@ impl Core {
             self.ring_alarm(&a);
         }
         if !disable.is_empty() {
-            self.update(|d| {
+            self.update_internal(|d| {
                 for a in d.alarms.iter_mut().filter(|a| disable.contains(&a.id)) {
                     a.enabled = false;
                 }
@@ -1610,6 +1627,76 @@ mod bed_tests {
         let p = st.test_open(&core, None);
         assert!(!st.test_close(reopened) && st.editing());
         assert!(st.test_close(p));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remote_change_during_freeze_is_not_lost() {
+        // 업데이트 교체 직전(freeze) 들어온 다른 PC 변경: 거절됐으면 받은 것으로 치지 않고(중계 · rev 소비 안 함),
+        // 교체가 취소돼 풀리면 그때 적용
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("tempo-freeze-sync-{}", std::process::id()));
+        std::env::set_var("TEMPO_DIR", &dir);
+        let t = TimerDef::simple("원격", 60, "#5B8DEF");
+        let id = t.id;
+        let core = Core::new(Data { timers: vec![t.clone()], ..Data::seed() }, (0.0, 0.0, 1920.0, 1080.0), (0.0, 0.0, 1920.0, 1080.0));
+        let mut t2 = t.clone();
+        t2.name = "원격 바뀜".into();
+        let key = format!("t:{id}");
+        let val = crate::sync::items(&Data { timers: vec![t2], ..Data::seed() })[&key].clone();
+        let now = crate::sync::now_ms();
+        let msg = serde_json::json!({ "t": "items", "now": now, "items": { key.clone(): { "r": now + 1000, "v": val } } });
+        let name = |c: &Core| c.data().timers.iter().find(|x| x.id == id).map(|x| x.name.clone()).unwrap();
+        core.freeze(true);
+        let acc = crate::sync::on_items(&core, &msg);
+        assert!(acc.is_empty(), "거절된 변경은 받은 것으로 치지 않음 (중계 안 함)");
+        assert_eq!(name(&core), "원격");
+        core.freeze(false); // 교체 취소 → 보류했던 변경 적용
+        assert_eq!(name(&core), "원격 바뀜");
+        // 같은 변경을 다시 받아도(재연결) 값은 그대로 (시각 보정 차이로 rev 만 맞출 수는 있음)
+        let _ = crate::sync::on_items(&core, &msg);
+        assert_eq!(name(&core), "원격 바뀜");
+        // 교체가 이어지는 경우: 거절된 변경은 rev 를 소비하지 않았으므로 새 버전이 다시 연결할 때 받음
+        let mut t3 = t.clone();
+        t3.name = "교체 중 변경".into();
+        let v3 = crate::sync::items(&Data { timers: vec![t3], ..Data::seed() })[&key].clone();
+        let now = crate::sync::now_ms();
+        let msg3 = serde_json::json!({ "t": "items", "now": now, "items": { key.clone(): { "r": now + 5000, "v": v3 } } });
+        core.freeze(true);
+        assert!(crate::sync::on_items(&core, &msg3).is_empty());
+        let rev_after = crate::sync::local_rev(&key);
+        assert!(rev_after < now + 5000, "거절된 변경의 rev 는 기록되지 않음");
+        core.freeze(false);
+        assert_eq!(name(&core), "교체 중 변경");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_shot_alarm_turns_off_even_during_freeze() {
+        // 교체 직전(freeze) 일회성 알람이 울리면 「끔」은 막지 않음 — 막으면 교체가 취소된 뒤 다음 날 또 울림
+        use chrono::Timelike;
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("tempo-freeze-alarm-{}", std::process::id()));
+        std::env::set_var("TEMPO_DIR", &dir);
+        let due = Local::now() - chrono::Duration::minutes(2);
+        let mut a = AlarmDef::new();
+        a.hour = due.hour();
+        a.minute = due.minute();
+        a.days = [false; 7]; // 한 번만
+        a.sound = "none".into();
+        let aid = a.id;
+        let core = Core::new(Data { timers: vec![], alarms: vec![a.clone()], ..Data::seed() }, (0.0, 0.0, 1920.0, 1080.0), (0.0, 0.0, 1920.0, 1080.0));
+        {
+            let mut art = core.alarm_rt.lock().unwrap();
+            let r = art.entry(aid).or_default();
+            r.next = alarm::next_fire(&a, due - chrono::Duration::minutes(1));
+            r.sig = Some(alarm_sig(&a));
+        }
+        core.freeze(true);
+        core.tick_alarms();
+        assert!(core.rings().iter().any(|r| r.0 == RingKind::Alarm(aid)), "울림");
+        core.freeze(false); // 알림이 울려 교체 취소
+        assert!(!core.data().alarms.iter().find(|x| x.id == aid).unwrap().enabled, "일회성 알람은 꺼져 있어야 함");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
