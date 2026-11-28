@@ -370,6 +370,11 @@ pub fn paint_pause(pt: &egui::Painter, c: Pos2, s: f32, fg: Color32) {
     }
 }
 
+/// 끝내기(■) — 진행 중인 타이머를 멈추고 처음으로
+pub fn paint_stop(pt: &egui::Painter, c: Pos2, s: f32, fg: Color32) {
+    pt.rect_filled(Rect::from_center_size(c, egui::vec2(s * 1.7, s * 1.7)), cr(s * 0.3), fg);
+}
+
 pub fn paint_reset(pt: &egui::Painter, c: Pos2, s: f32, fg: Color32) {
     let r = s;
     let stroke = Stroke::new(s * 0.34, fg);

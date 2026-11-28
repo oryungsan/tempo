@@ -4,7 +4,7 @@ use super::styles::{self, Disp};
 use super::theme::*;
 use crate::core::{Core, TimerView};
 use crate::engine::{Cmd, Phase};
-use crate::model::{CardMode, Id, Style, TimerDef};
+use crate::model::{CardMode, Style, TimerDef};
 use eframe::egui::{self, text::LayoutJob, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, TextFormat, ViewportCommand};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -266,7 +266,7 @@ fn card_menu(core: &Arc<Core>, def: &TimerDef, v: &TimerView, st: &CardState, st
     if multi {
         items.push(Item::Cmd(2, "다음 단계로".into(), false, v.phase.active()));
     }
-    items.push(Item::Cmd(3, "처음으로".into(), false, v.phase != Phase::Idle));
+    items.push(Item::Cmd(3, "끝내기 (처음으로)".into(), false, v.phase != Phase::Idle));
     items.push(Item::Sep);
     if multi {
         items.push(cmd(4, if st.expanded { "단계 목록 접기" } else { "단계 목록 펼치기" }));
@@ -360,6 +360,20 @@ fn play_btn(ui: &mut egui::Ui, core: &Arc<Core>, def: &TimerDef, v: &TimerView, 
             _ => "시작",
         }
     ));
+}
+
+/// 끝내기(■) 동그란 버튼 — 진행 중(실행 · 일시정지 · 끝)일 때만. 누르면 멈추고 처음으로 (스타일 공용)
+fn stop_btn(ui: &mut egui::Ui, core: &Arc<Core>, def: &TimerDef, v: &TimerView, c: Pos2, r: f32, pc: &Pal) {
+    if v.phase == Phase::Idle {
+        return;
+    }
+    let rs = round_btn(ui, c, r, ui.id().with(("stop", def.id)), pc.input, pc.red.gamma_multiply(0.55));
+    paint_stop(ui.painter(), c, r * 0.33, pc.text);
+    if rs.clicked() {
+        core.cmd(def.id, Cmd::Reset, "card");
+    }
+    let hk = if def.hotkey_reset.is_empty() { String::new() } else { format!("  ({})", def.hotkey_reset) };
+    rs.on_hover_text(format!("끝내기 — 멈추고 처음으로{hk}"));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -510,14 +524,8 @@ fn paint_hourglass(ui: &mut egui::Ui, ctx: &egui::Context, core: &Arc<Core>, def
     p.galley(Pos2::new(x, card.bottom() - 28.0 * k), sg, pc.faint);
     let pb = Pos2::new(card.right() - 32.0 * k, card.top() + 32.0 * k);
     play_btn(ui, core, def, v, pb, 15.0 * k, pc, d.color);
-    // 뒤집기
-    let fb = Pos2::new(pb.x, pb.y + 38.0 * k);
-    let rf = round_btn(ui, fb, 15.0 * k, ui.id().with(("flip", def.id)), pc.input, pc.card_hi);
-    paint_reset(&p, fb, 5.6 * k, pc.text);
-    if rf.clicked() {
-        core.flip(def.id);
-    }
-    rf.on_hover_text("뒤집기 — 이 단계를 처음부터");
+    // 아래 = 끝내기. (예전 「뒤집기」 버튼은 처음으로(↻) 그림이라 끝내려고 눌러도 그 단계가 다시 돌았음 → 뒤집기는 오른쪽 클릭 메뉴)
+    stop_btn(ui, core, def, v, Pos2::new(pb.x, pb.y + 38.0 * k), 15.0 * k, pc);
 }
 
 // ── 원형: 동그란 위젯 ───────────────────────────────────────
@@ -536,7 +544,12 @@ fn paint_ring(ui: &mut egui::Ui, ctx: &egui::Context, core: &Arc<Core>, def: &Ti
     let sub = if v.phase.active() && def.steps.len() > 1 { v.step_name.clone() } else { d.sub.clone() };
     let sg = truncated(ctx, &sub, FontId::proportional(11.5 * k), pc.faint, r * 1.4);
     p.galley(Pos2::new(c.x - sg.size().x / 2.0, c.y + 24.0 * k), sg, pc.faint);
-    play_btn(ui, core, def, v, Pos2::new(c.x, c.y + 62.0 * k), 13.0 * k, pc, d.color);
+    if v.phase == Phase::Idle {
+        play_btn(ui, core, def, v, Pos2::new(c.x, c.y + 62.0 * k), 13.0 * k, pc, d.color);
+    } else {
+        play_btn(ui, core, def, v, Pos2::new(c.x - 16.0 * k, c.y + 62.0 * k), 13.0 * k, pc, d.color);
+        stop_btn(ui, core, def, v, Pos2::new(c.x + 16.0 * k, c.y + 62.0 * k), 13.0 * k, pc);
+    }
 }
 
 // ── 미니멀: 숫자만 크게 ─────────────────────────────────────
@@ -557,6 +570,7 @@ fn paint_minimal(ui: &mut egui::Ui, ctx: &egui::Context, core: &Arc<Core>, def: 
         p.line_segment([Pos2::new(l, y), Pos2::new(x2, y)], Stroke::new(2.0_f32 * k, d.color));
     }
     play_btn(ui, core, def, v, Pos2::new(card.right() - 32.0 * k, card.center().y + 2.0 * k), 15.0 * k, pc, d.color);
+    stop_btn(ui, core, def, v, Pos2::new(card.right() - 68.0 * k, card.center().y + 2.0 * k), 15.0 * k, pc);
 }
 
 // ── 디지털: LCD 패널 ───────────────────────────────────────
@@ -591,7 +605,12 @@ fn paint_digital(ui: &mut egui::Ui, ctx: &egui::Context, core: &Arc<Core>, def: 
         let on = (i as f32 + 0.5) / n as f32 <= d.done_total;
         p.rect_filled(Rect::from_min_size(Pos2::new(x, panel.bottom() - 7.0 * k), egui::vec2((panel.width() - 20.0 * k) / n as f32 - 3.0 * k, 3.0 * k)), cr(1.0), if on { col } else { styles::lcd_tick_off(pc) });
     }
-    play_btn(ui, core, def, v, Pos2::new(r - 16.0 * k, panel.center().y), 15.0 * k, pc, d.color);
+    if v.phase == Phase::Idle {
+        play_btn(ui, core, def, v, Pos2::new(r - 16.0 * k, panel.center().y), 15.0 * k, pc, d.color);
+    } else {
+        play_btn(ui, core, def, v, Pos2::new(r - 16.0 * k, panel.center().y - 18.0 * k), 15.0 * k, pc, d.color);
+        stop_btn(ui, core, def, v, Pos2::new(r - 16.0 * k, panel.center().y + 18.0 * k), 15.0 * k, pc);
+    }
 }
 
 // ── 채우기: 진행만큼 바탕이 차오름 ─────────────────────────────
@@ -602,22 +621,23 @@ fn paint_fill(ui: &mut egui::Ui, ctx: &egui::Context, core: &Arc<Core>, def: &Ti
     let tint = if v.phase == Phase::Done { pc.green } else { d.color };
     styles::fill(&p, card.shrink(1.0), 15.0 * k, d.done_total, tint.gamma_multiply(if pc.dark { 0.38 } else { 0.28 }));
     let l = card.left() + 18.0 * k;
-    let name = truncated(ctx, &def.name, bold(13.0 * k), pc.text, card.width() - 100.0 * k);
+    let tw = card.width() - if v.phase == Phase::Idle { 100.0 * k } else { 128.0 * k }; // 끝내기 버튼 자리
+    let name = truncated(ctx, &def.name, bold(13.0 * k), pc.text, tw);
     p.galley(Pos2::new(l, card.top() + 14.0 * k), name, pc.text);
-    let st = truncated(ctx, &d.status, FontId::proportional(12.0 * k), pc.muted, card.width() - 100.0 * k);
+    let st = truncated(ctx, &d.status, FontId::proportional(12.0 * k), pc.muted, tw);
     p.galley(Pos2::new(l, card.top() + 34.0 * k), st, pc.muted);
     let font = digits(if d.text.len() > 5 { 40.0 * k } else { 52.0 * k });
     draw_digits(&p, ctx, Pos2::new(l - 2.0 * k, card.bottom() - 12.0 * k), false, &d.text, font, d.dcol);
     let pct = format!("{}%", (d.done_total * 100.0).round());
     p.text(Pos2::new(card.right() - 18.0 * k, card.bottom() - 16.0 * k), Align2::RIGHT_BOTTOM, pct, digits(15.0 * k), pc.muted);
     play_btn(ui, core, def, v, Pos2::new(card.right() - 34.0 * k, card.top() + 34.0 * k), 15.0 * k, pc, d.color);
+    stop_btn(ui, core, def, v, Pos2::new(card.right() - 70.0 * k, card.top() + 34.0 * k), 15.0 * k, pc);
 }
 
 // ── 클래식 ────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
 fn paint_classic(ui: &mut egui::Ui, ctx: &egui::Context, core: &Arc<Core>, def: &TimerDef, v: &TimerView, st: &mut CardState, k: f32, card: Rect, pc: &Pal) {
-    let id: Id = def.id;
     let multi = def.steps.len() > 1;
     let color = color_of(&def.color);
     let accent = if v.phase == Phase::Done { pc.green } else { color };
@@ -662,15 +682,7 @@ fn paint_classic(ui: &mut egui::Ui, ctx: &egui::Context, core: &Arc<Core>, def: 
     let r = 15.0 * k;
     let b2 = Pos2::new(right - r, hy);
     play_btn(ui, core, def, v, b2, r, pc, accent);
-    if v.phase != Phase::Idle {
-        let b1 = Pos2::new(b2.x - 38.0 * k, hy);
-        let rr = round_btn(ui, b1, r, ui.id().with(("reset", def.id)), pc.input, pc.card_hi);
-        paint_reset(&p, b1, 5.6 * k, pc.text);
-        if rr.clicked() {
-            core.cmd(id, Cmd::Reset, "card");
-        }
-        rr.on_hover_text("처음으로");
-    }
+    stop_btn(ui, core, def, v, Pos2::new(b2.x - 38.0 * k, hy), r, pc);
 
     // 단계 이름 / 상태 (베드 = 환자 · 프로그램)
     let name = if let Some(l) = super::styles::bed_label(def, v) { l } else { match v.phase {
