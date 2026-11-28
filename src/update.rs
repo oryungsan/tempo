@@ -400,6 +400,10 @@ mod tests {
         assert!(!newer("1.3.0", "1.3.0"));
         assert!(!newer("v1.2.9", "1.3.0"));
         assert!(!newer("garbage", "1.3.0"));
+        // 수동 배포 빌드 「1.13.0+1」 = 1.13.0 과 같게 취급 (1.13.0 으로 되돌리지 않음, 1.13.1 이 나오면 받음)
+        assert_eq!(ver("1.13.0+1"), Some((1, 13, 0)));
+        assert!(!newer("v1.13.0", "1.13.0+1"));
+        assert!(newer("v1.13.1", "1.13.0+1"));
         let body = "받는 법 …\n\nSHA-256 (zip): `aaaa`\nSHA-256 (exe): `53C511A344CB7E7E29F3C531A13D31F7B967FC8B91087AE6904E35797DB1BB38`\n";
         assert_eq!(exe_sha(body).unwrap(), "53c511a344cb7e7e29f3c531a13d31f7b967fc8b91087ae6904e35797db1bb38");
         assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
